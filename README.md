@@ -42,6 +42,7 @@ PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng 
 - ▶️ **Quick Actions** - Start, stop, restart VMs and containers
 - ⚙️ **VM Configuration** - Edit CPU, RAM, disks, network, EFI, Secure Boot & more
 - 📸 **Snapshots** - Standard and space-efficient LVM snapshots for shared storage
+- 🔁 **Snapshot Replication** - Storage-agnostic replication for clusters without ZFS
 - 💾 **Backups** - Schedule and manage backups
 - 🖱️ **noVNC / xterm.js Console** - Browser-based console for QEMU and LXC
 - ⚖️ **Load Balancing** - Automatic VM distribution across nodes
@@ -70,6 +71,8 @@ PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng 
 - 🏢 **Multi-Tenancy** - Isolate clusters for different customers
 - 🚫 **IP Whitelisting / Blacklisting** - Restrict access by IP or CIDR range
 - 🔒 **AES-256-GCM Encryption** - All stored credentials encrypted at rest
+- 🔍 **CVE Scanner** - Per-node package vulnerability scanning via debsecan
+- 🛡️ **CIS Hardening** - One-click security audit and hardening against CIS benchmarks
 
 ### Automation & Monitoring
 - ⏰ **Scheduled Tasks** - Automate VM actions (start, stop, snapshot, backup)

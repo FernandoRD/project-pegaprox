@@ -2245,6 +2245,7 @@
             });
             const [xhmSourceVms, setXhmSourceVms] = useState([]);
             const xhmSelectedMigrationRef = useRef(null);
+            const lastReconnectToast = useRef({});  // cluster_id -> timestamp, avoid toast spam
 
             // NS: auto-clear topology/xhm sidebar when navigating to something else
             useEffect(() => { if (selectedCluster || selectedPBS || selectedVMware || selectedGroup) { setSidebarTopology(false); setSidebarXHM(false); } }, [selectedCluster, selectedPBS, selectedVMware, selectedGroup]);
@@ -4282,9 +4283,14 @@
                                     msg: nodeEvent.message || `${nodeEvent.node}: ${nodeEvent.event}`
                                 }, ...prev].slice(0, 10));
 
-                                // NS: Feb 2026 - Cluster reconnect events are shown for ANY cluster
+                                // NS: Feb 2026 - Cluster reconnect events, deduplicated to avoid toast spam (#163)
                                 if (nodeEvent.event === 'cluster_reconnected') {
-                                    addToast(`✓ ${nodeEvent.message}`, 'success');
+                                    const cid = nodeEvent.cluster_id;
+                                    const now = Date.now();
+                                    if (!lastReconnectToast.current[cid] || now - lastReconnectToast.current[cid] > 60000) {
+                                        lastReconnectToast.current[cid] = now;
+                                        addToast(`✓ ${nodeEvent.message}`, 'success');
+                                    }
                                 } else if (currentCluster && nodeEvent.cluster_id === currentCluster.id) {
                                     if (nodeEvent.event === 'node_offline') {
                                         // Show critical alert for node offline

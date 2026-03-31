@@ -2783,6 +2783,8 @@
             const [rfb, setRfb] = useState(null);
             const rfbRef = useRef(null);
             const containerRef = useRef(null);
+            const retryCount = useRef(0);
+            const maxRetries = 3;
             const { getAuthHeaders, sessionId, reverseProxyEnabled } = useAuth();
 
             useEffect(() => {
@@ -2850,15 +2852,14 @@
                         if(!window.RFB) {
                             console.log('VNC: Loading noVNC...');
                             await new Promise((resolve, reject) => {
+                                let settled = false;
                                 const script = document.createElement('script');
                                 script.type = 'module';
-                                // NS: local path works if --download-static was run
                                 const localPath = '/static/js/novnc/rfb.min.js';
                                 const cdnPath = 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
                                 script.textContent = `
                                     let RFB;
                                     try {
-                                        // Try local bundled version first
                                         const resp = await fetch('${localPath}', {method: 'HEAD'});
                                         if (resp.ok) {
                                             RFB = (await import('${localPath}')).default;
@@ -2867,7 +2868,6 @@
                                             throw new Error('local not found');
                                         }
                                     } catch(e) {
-                                        // Fallback to CDN
                                         RFB = (await import('${cdnPath}')).default;
                                         console.log('VNC: loaded from CDN');
                                     }
@@ -2878,30 +2878,37 @@
                                         window.dispatchEvent(new CustomEvent('novnc-failed'));
                                     }
                                 `;
-                                
-                                const onLoaded = () => {
+
+                                const cleanup = () => {
                                     window.removeEventListener('novnc-loaded', onLoaded);
                                     window.removeEventListener('novnc-failed', onFailed);
+                                };
+                                const onLoaded = () => {
+                                    if (settled) return;
+                                    settled = true;
+                                    cleanup();
                                     console.log('VNC: noVNC ready');
                                     resolve();
                                 };
                                 const onFailed = () => {
-                                    window.removeEventListener('novnc-loaded', onLoaded);
-                                    window.removeEventListener('novnc-failed', onFailed);
+                                    if (settled) return;
+                                    settled = true;
+                                    cleanup();
                                     reject(new Error('Failed to load noVNC'));
                                 };
-                                
+
                                 window.addEventListener('novnc-loaded', onLoaded);
                                 window.addEventListener('novnc-failed', onFailed);
                                 document.head.appendChild(script);
-                                
+
+                                // NS: 20s timeout, but only reject if load hasn't completed yet
                                 setTimeout(() => {
-                                    if(!window.RFB) {
-                                        window.removeEventListener('novnc-loaded', onLoaded);
-                                        window.removeEventListener('novnc-failed', onFailed);
+                                    if(!settled && !window.RFB) {
+                                        settled = true;
+                                        cleanup();
                                         reject(new Error('noVNC load timeout'));
                                     }
-                                }, 10000);
+                                }, 20000);
                             });
                         }
                         
@@ -2921,12 +2928,23 @@
 
                         rfbInstance.addEventListener('connect', () => {
                             console.log('VNC: Connected!');
+                            retryCount.current = 0;
                             setConnectionStatus('connected');
                         });
 
                         rfbInstance.addEventListener('disconnect', (e) => {
                             console.log('VNC: Disconnected', e.detail);
-                            setConnectionStatus(e.detail.clean ? 'disconnected' : 'error');
+                            if (e.detail.clean) {
+                                setConnectionStatus('disconnected');
+                            } else if (!cancelled && retryCount.current < maxRetries) {
+                                retryCount.current++;
+                                console.log(`VNC: Reconnecting (${retryCount.current}/${maxRetries})...`);
+                                setConnectionStatus('reconnecting');
+                                rfbRef.current = null;
+                                setTimeout(() => { if (!cancelled) startVNC(); }, 2000);
+                            } else {
+                                setConnectionStatus('error');
+                            }
                         });
 
                         rfbInstance.addEventListener('securityfailure', (e) => {
@@ -3049,11 +3067,12 @@
                                         {vm.type.toUpperCase()} · {vm.node} · 
                                         <span className={`ml-1 ${
                                             connectionStatus === 'connected' ? 'text-green-400' :
-                                            connectionStatus === 'connecting' ? 'text-yellow-400' :
+                                            (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') ? 'text-yellow-400' :
                                             'text-red-400'
                                         }`}>
                                             {connectionStatus === 'connected' ? 'Connected' :
                                              connectionStatus === 'connecting' ? 'Connecting...' :
+                                             connectionStatus === 'reconnecting' ? 'Reconnecting...' :
                                              'Error'}
                                         </span>
                                     </p>
@@ -3105,11 +3124,11 @@
 
                         {/* Console Area */}
                         <div className="flex-1 bg-black relative overflow-hidden">
-                            {connectionStatus === 'connecting' && (
+                            {(connectionStatus === 'connecting' || connectionStatus === 'reconnecting') && (
                                 <div className="absolute inset-0 flex items-center justify-center bg-proxmox-darker">
                                     <div className="text-center">
                                         <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full mx-auto mb-4"></div>
-                                        <p className="text-gray-400">Connecting to console...</p>
+                                        <p className="text-gray-400">{connectionStatus === 'reconnecting' ? `Reconnecting (${retryCount.current}/${maxRetries})...` : 'Connecting to console...'}</p>
                                     </div>
                                 </div>
                             )}

@@ -8577,7 +8577,7 @@ echo "AGENT_INSTALLED_OK"
         
         try:
             # Find the source node for this VM
-            resources = self.get_cluster_resources()
+            resources = self.get_vm_resources()
             vm = next((r for r in resources if r.get('vmid') == vmid), None)
             if not vm:
                 return {'success': False, 'error': f'VM {vmid} not found'}

@@ -245,9 +245,23 @@ def _run_v2p_migration(task):
         # Find VM directory on ESXi datastore
         datastore = task.esxi_datastore
         vm_dir = task.esxi_vm_dir or vm_data.get('name', '')
-        
+
+        # Extract datastore + vm dir from VMDK path if available
+        # pyvmomi returns paths like "[datastore1] VM-Name/disk.vmdk"
+        if not datastore and disks:
+            vmdk_path = disks[0].get('vmdk_file', '')
+            m = re.match(r'\[(.+?)\]\s+(.+)', vmdk_path)
+            if m:
+                datastore = m.group(1)
+                rel = m.group(2)
+                # VSAN uses UUID dirs, not VM name - grab actual dir from path
+                if '/' in rel:
+                    vm_dir = rel.split('/')[0]
+                task.log(f"Datastore from VM config: {datastore}")
+
+        # SSH find as fallback (won't work on VSAN or restricted shells)
         if not datastore:
-            task.log("Auto-detecting datastore...")
+            task.log("Auto-detecting datastore via SSH...")
             rc, out, err = _ssh_exec(esxi_host, esxi_user, esxi_pass,
                 f"find /vmfs/volumes/ -maxdepth 3 -name {shlex.quote(vm_dir)} -type d 2>/dev/null | head -5",
                 timeout=30)
@@ -257,7 +271,7 @@ def _run_v2p_migration(task):
                 if len(parts) >= 4:
                     datastore = parts[3]
                     task.log(f"Found VM on datastore: {datastore}")
-        
+
         if not datastore:
             task.set_phase('failed', 'Could not determine ESXi datastore. Please specify it manually.'); return
         

@@ -2657,7 +2657,8 @@
             const [targetCluster, setTargetCluster] = useState('');
             const [targetNode, setTargetNode] = useState('');
             const [targetStorage, setTargetStorage] = useState('');
-            const [targetBridge, setTargetBridge] = useState('vmbr0');
+            const [targetBridgeMap, setTargetBridgeMap] = useState({});  // {sourceBridge: targetBridge}
+            const [sourceNics, setSourceNics] = useState([]);  // [{id: 'net0', bridge: 'vmbr0'}, ...]
             const [targetVmid, setTargetVmid] = useState('');
             const [online, setOnline] = useState(true);
             const [forceOnline, setForceOnline] = useState(false);  // Force online migration for large disks
@@ -2747,6 +2748,25 @@
                         }
                     });
                     setEstimatedDiskGb(totalDiskGb);
+
+                    // Parse NICs for per-NIC bridge mapping
+                    const nics = [];
+                    Object.keys(config).sort().forEach(key => {
+                        if (!key.match(/^net\d+$/)) return;
+                        const val = config[key];
+                        if (typeof val !== 'string') return;
+                        const bridgeMatch = val.match(/bridge=([^,]+)/);
+                        if (bridgeMatch) {
+                            nics.push({ id: key, bridge: bridgeMatch[1] });
+                        }
+                    });
+                    setSourceNics(nics);
+                    // init bridge map: default to same bridge name
+                    setTargetBridgeMap(prev => {
+                        const m = {};
+                        nics.forEach(n => { m[n.bridge] = prev[n.bridge] || n.bridge; });
+                        return m;
+                    });
                 };
                 
                 const checkVmConfig = async () => {
@@ -2829,8 +2849,18 @@
                     const networkRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes/${targetNode}/networks`);
                     if(networkRes && networkRes.ok) {
                         const networks = await networkRes.json();
-                        // Include local bridges AND SDN VNets
-                        setTargetBridges(networks.filter(n => n.type === 'bridge' || n.type === 'OVSBridge' || n.source === 'sdn'));
+                        const bridges = networks.filter(n => n.type === 'bridge' || n.type === 'OVSBridge' || n.source === 'sdn');
+                        setTargetBridges(bridges);
+                        // update bridge map defaults: keep source bridge if it exists on target, else first available
+                        const availNames = bridges.map(b => b.iface);
+                        const fallback = availNames[0] || 'vmbr0';
+                        setTargetBridgeMap(prev => {
+                            const updated = {};
+                            Object.entries(prev).forEach(([src, tgt]) => {
+                                updated[src] = availNames.includes(src) ? src : (availNames.includes(tgt) ? tgt : fallback);
+                            });
+                            return updated;
+                        });
                     }
                 } catch (error) {
                     console.error('to load target resources:', error);
@@ -2839,9 +2869,9 @@
             };
 
             const handleMigrate = async () => {
-                if (!targetCluster || !targetNode || !targetStorage || !targetBridge) return;
+                if (!targetCluster || !targetNode || !targetStorage) return;
                 setLoading(true);
-                await onMigrate({
+                const payload = {
                     source_cluster: sourceCluster.id,
                     target_cluster: targetCluster,
                     vmid: vm.vmid,
@@ -2849,12 +2879,18 @@
                     source_node: vm.node,
                     target_node: targetNode,
                     target_storage: targetStorage,
-                    target_bridge: targetBridge,
                     target_vmid: targetVmid ? parseInt(targetVmid) : null,
                     online,
                     force_online: forceOnline,
                     delete_source: deleteSource
-                });
+                };
+                // per-NIC bridge mapping or single fallback
+                if (Object.keys(targetBridgeMap).length > 0) {
+                    payload.target_bridge_map = targetBridgeMap;
+                } else {
+                    payload.target_bridge = 'vmbr0';
+                }
+                await onMigrate(payload);
                 setLoading(false);
                 onClose();
             };
@@ -3008,32 +3044,52 @@
                                                                 </select>
                                                             </div>
 
-                                                            {/* Target Bridge */}
+                                                            {/* Network Mapping - per NIC */}
                                                             <div>
-                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetBridge')} / VNet</label>
-                                                                <select
-                                                                    value={targetBridge}
-                                                                    onChange={(e) => setTargetBridge(e.target.value)}
-                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
-                                                                >
-                                                                    {targetBridges.length === 0 && <option value="vmbr0">vmbr0</option>}
-                                                                    {/* Local bridges */}
-                                                                    {targetBridges.filter(b => b.source !== 'sdn').length > 0 && (
-                                                                        <optgroup label="Local Bridges">
-                                                                            {targetBridges.filter(b => b.source !== 'sdn').map(b => (
-                                                                                <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
-                                                                            ))}
-                                                                        </optgroup>
-                                                                    )}
-                                                                    {/* SDN VNets */}
-                                                                    {targetBridges.filter(b => b.source === 'sdn').length > 0 && (
-                                                                        <optgroup label="SDN VNets">
-                                                                            {targetBridges.filter(b => b.source === 'sdn').map(b => (
-                                                                                <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
-                                                                            ))}
-                                                                        </optgroup>
-                                                                    )}
-                                                                </select>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('networkMappings') || 'Network Mapping'}</label>
+                                                                {sourceNics.length > 0 ? (
+                                                                    <div className="space-y-2">
+                                                                        {sourceNics.map(nic => (
+                                                                            <div key={nic.id} className="flex items-center gap-2">
+                                                                                <span className="text-xs text-gray-500 w-16 shrink-0">{nic.id}</span>
+                                                                                <span className="text-xs text-gray-400 w-20 shrink-0 truncate" title={nic.bridge}>{nic.bridge}</span>
+                                                                                <span className="text-gray-600">→</span>
+                                                                                <select
+                                                                                    value={targetBridgeMap[nic.bridge] || 'vmbr0'}
+                                                                                    onChange={(e) => setTargetBridgeMap(prev => ({...prev, [nic.bridge]: e.target.value}))}
+                                                                                    className="flex-1 px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm"
+                                                                                >
+                                                                                    {targetBridges.length === 0 && <option value="vmbr0">vmbr0</option>}
+                                                                                    {targetBridges.filter(b => b.source !== 'sdn').length > 0 && (
+                                                                                        <optgroup label="Bridges">
+                                                                                            {targetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                    {targetBridges.filter(b => b.source === 'sdn').length > 0 && (
+                                                                                        <optgroup label="SDN VNets">
+                                                                                            {targetBridges.filter(b => b.source === 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                </select>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                ) : (
+                                                                    <select
+                                                                        value={Object.values(targetBridgeMap)[0] || 'vmbr0'}
+                                                                        onChange={(e) => setTargetBridgeMap({'vmbr0': e.target.value})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                    >
+                                                                        {targetBridges.length === 0 && <option value="vmbr0">vmbr0</option>}
+                                                                        {targetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                            <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                        ))}
+                                                                    </select>
+                                                                )}
                                                             </div>
 
                                                             {/* Target VMID (optional) */}

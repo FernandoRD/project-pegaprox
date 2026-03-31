@@ -122,7 +122,8 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
 
         target_bridge = 'vmbr0'
         if net_map:
-            target_bridge = list(net_map.values())[0] if net_map else 'vmbr0'
+            # build PVE mapping format: "src_bridge=tgt_bridge,src2=tgt2"
+            target_bridge = ','.join(f"{s}={t}" for s, t in net_map.items())
 
         # create temp token on target for migration auth
         token_result = tgt_mgr.create_api_token('pegaprox-sr')

@@ -6512,7 +6512,7 @@ if __name__ == '__main__':
 
 
 # Terminal/Shell WebSocket proxy (legacy - flask-sock version, kept for non-gevent setups)
-@sock.route('/api/clusters/<cluster_id>/nodes/<node>/shellwebsocket')
+@sock.route('/api/clusters/<cluster_id>/nodes/<node>/shellws')
 def node_shell_websocket_proxy(ws, cluster_id, node):
     """WebSocket proxy for node shell via SSH"""
 
@@ -7042,7 +7042,12 @@ def cross_cluster_migrate_api():
     source_node = data.get('source_node')
     target_node = data.get('target_node')
     target_storage = data.get('target_storage')
-    target_bridge = data.get('target_bridge', 'vmbr0')
+    # per-NIC bridge mapping: {"vmbr0": "vmbr0", "vmbr1": "vmbr2"} → PVE format "vmbr0=vmbr0,vmbr1=vmbr2"
+    bridge_map = data.get('target_bridge_map')
+    if bridge_map and isinstance(bridge_map, dict):
+        target_bridge = ','.join(f"{s}={t}" for s, t in bridge_map.items())
+    else:
+        target_bridge = data.get('target_bridge', 'vmbr0')
     target_vmid = data.get('target_vmid')
     online = data.get('online', True)
     force_online = data.get('force_online', False)  # Override automatic offline for large disks

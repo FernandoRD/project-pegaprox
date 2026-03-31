@@ -893,45 +893,6 @@ def get_cluster_creds_internal(cluster_id):
                             node_ips[node_name] = node_ip
                             node_ips[node_name.lower()] = node_ip
 
-            # Method 2: Get all nodes and ensure they have IPs
-            resources = mgr.get_cluster_resources()
-            if resources.get('success'):
-                for node in resources.get('nodes', []):
-                    node_name = node.get('node', '')
-                    node_lower = node_name.lower()
-
-                    # Already have IP?
-                    if node_lower in [k.lower() for k in node_ips.keys() if node_ips.get(k)]:
-                        continue
-
-                    logging.info(f"[CLUSTER-CREDS] Node {node_name} needs IP lookup")
-
-                    # Try network config API
-                    try:
-                        net_url = f"https://{host}:8006/api2/json/nodes/{node_name}/network"
-                        r = mgr._create_session().get(net_url, timeout=5)
-                        if r.status_code == 200:
-                            for iface in r.json().get('data', []):
-                                iface_type = iface.get('type', '')
-                                addr = iface.get('address', '')
-                                cidr = iface.get('cidr', '')
-
-                                if not addr and cidr:
-                                    addr = cidr.split('/')[0]
-
-                                if addr and iface_type in ['bridge', 'eth', 'bond', 'OVSBridge', 'vlan']:
-                                    node_ips[node_name] = addr
-                                    node_ips[node_lower] = addr
-                                    logging.info(f"[CLUSTER-CREDS] Node {node_name} IP from network: {addr}")
-                                    break
-                    except Exception as e:
-                        logging.warning(f"[CLUSTER-CREDS] Network API failed for {node_name}: {e}")
-
-                    # Fallback: use cluster host
-                    if node_name not in node_ips:
-                        node_ips[node_name] = cluster_host
-                        node_ips[node_lower] = cluster_host
-                        logging.info(f"[CLUSTER-CREDS] Node {node_name} using cluster host: {cluster_host}")
 
         except Exception as e:
             logging.error(f"[CLUSTER-CREDS] Error getting node IPs: {e}")

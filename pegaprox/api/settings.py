@@ -2670,17 +2670,22 @@ def index():
 
 @bp.route('/status')
 def status_page():
-    """Serve public status page (no auth — key is in URL)"""
+    """Serve public status page — only if plugin is enabled"""
+    from pegaprox.api.plugins import _loaded_plugins
+    if 'status_page' not in _loaded_plugins:
+        return '<h1>Status Page not available</h1><p>The Status Page plugin is not enabled.</p>', 404
     import os
     path = os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'status_page', 'status.html')
     if os.path.exists(path):
         return send_file(path)
-    return '<h1>Status Page not installed</h1><p>Enable the Status Page plugin in Settings → Plugins</p>', 404
+    return '<h1>Status Page not installed</h1>', 404
 
 @bp.route('/api/public/status-page', methods=['GET'])
 def public_status_api():
-    """NS: Apr 2026 — Public status endpoint, auth via URL key (no session).
-    Bypasses require_auth — key validated inside the plugin handler."""
+    """NS: Apr 2026 — Public status endpoint, auth via URL key (no session)."""
+    from pegaprox.api.plugins import _loaded_plugins
+    if 'status_page' not in _loaded_plugins:
+        return jsonify({'error': 'Status Page plugin not enabled'}), 404
     try:
         from plugins.status_page import _public_status
         result = _public_status()
@@ -2695,12 +2700,15 @@ def public_status_api():
 @bp.route('/portal')
 @bp.route('/portal/<path:subpath>')
 def client_portal_page(subpath=None):
-    """Serve client portal plugin frontend"""
+    """Serve client portal — only if plugin is enabled"""
+    from pegaprox.api.plugins import _loaded_plugins
+    if 'client_portal' not in _loaded_plugins:
+        return '<h1>Client Portal not available</h1><p>The Client Portal plugin is not enabled.</p>', 404
     import os
     portal_path = os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'client_portal', 'portal.html')
     if os.path.exists(portal_path):
         return send_file(portal_path)
-    return '<h1>Client Portal not installed</h1><p>Enable the Client Portal plugin in Settings → Plugins</p>', 404
+    return '<h1>Client Portal not installed</h1>', 404
 
 
 @bp.route('/oidc/callback')

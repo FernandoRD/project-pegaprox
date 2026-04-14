@@ -8,7 +8,6 @@
         "VM wizard: filter disk formats by storage type, ZFS/LVM show raw only (#307)",
         "VM wizard: searchable ISO dropdown, tab validation, scsihw fix (#304, #305, #306)",
         "Email-style usernames now allowed for login (#228)",
-        "Console modal enlarged for better visibility (#310)",
         "OIDC multi-group role mapping picks highest role (#293)",
         "ESXi migration: pre-flight tool check + clearer error messages (#311)",
         "Corporate Dark: fix gray-on-gray inputs, global search background (#303, #308)",

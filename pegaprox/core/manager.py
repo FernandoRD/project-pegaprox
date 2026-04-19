@@ -11073,6 +11073,10 @@ echo "AGENT_INSTALLED_OK"
                     'loadavg': data.get('loadavg', [0, 0, 0]),
                     'kversion': data.get('kversion', ''),
                     'pveversion': version_data.get('version', ''),
+                    # NS Apr 2026: normalize ksm so the Summary card can always show a number.
+                    # PVE returns {shared: N} (bytes). When pressure is low, shared=0 -- still
+                    # useful to surface so users know KSM is configured.
+                    'ksm': {'shared': int(((data.get('ksm') or {}).get('shared') or 0))},
                     'maintenance_mode': node in self.nodes_in_maintenance,
                 }
             return {}

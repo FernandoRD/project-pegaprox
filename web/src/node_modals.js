@@ -1171,7 +1171,7 @@
                                             </div>
                                             <div className="grid grid-cols-3 gap-4">
                                                 {[
-                                                    { label: 'Memory', used: data.summary.memory?.used, total: data.summary.memory?.total, color: 'bg-proxmox-orange' },
+                                                    { label: 'Memory', used: data.summary.memory?.used, total: data.summary.memory?.total, color: 'bg-proxmox-orange', ksm: data.summary.ksm?.shared },
                                                     { label: 'Swap', used: data.summary.swap?.used, total: data.summary.swap?.total, color: 'bg-blue-500' },
                                                     { label: 'Root FS', used: data.summary.rootfs?.used, total: data.summary.rootfs?.total, color: 'bg-green-500' },
                                                 ].map((item, i) => (
@@ -1183,6 +1183,15 @@
                                                             <div className="w-full bg-proxmox-hover rounded-full h-2">
                                                                 <div className={`${item.color} h-2 rounded-full`} style={{ width: `${((item.used||0)/(item.total||1))*100}%` }}></div>
                                                             </div>
+                                                            {/* NS Apr 2026: KSM Sharing inside Memory card — always shown
+                                                                on PVE (matches native UI); hidden on XCP-ng where backend
+                                                                returns no ksm field */}
+                                                            {typeof item.ksm === 'number' && (
+                                                                <div className="flex justify-between text-sm pt-1" title="Kernel Same-page Merging: dedup across VM RAM (only active under memory pressure)">
+                                                                    <span className="text-gray-400">{t('ksmSharing') || 'KSM Sharing'}</span>
+                                                                    <span className={item.ksm > 0 ? 'text-purple-400 font-mono' : 'text-gray-500 font-mono'}>{formatBytes(item.ksm || 0)}</span>
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 ))}

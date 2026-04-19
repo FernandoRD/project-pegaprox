@@ -1948,6 +1948,7 @@
             const [skipUpToDate, setSkipUpToDate] = useState(true);  // NS: Skip nodes without updates
             const [skipEvacuation, setSkipEvacuation] = useState(false);  // NS: Issue #22 - skip VM evacuation (NOT RECOMMENDED)
             const [evacuationTimeout, setEvacuationTimeout] = useState(1800);  // NS: 30 min default
+            const [rebootTimeout, setRebootTimeout] = useState(600);  // NS Apr 2026 (#328): 10 min default, extend for Ceph/slow-boot nodes
             const [waitForReboot, setWaitForReboot] = useState(true);  // NS: GitHub #40 - wait for node online before next
             const [pauseOnEvacError, setPauseOnEvacError] = useState(true);  // NS: GitHub #40 - pause if VMs fail to migrate
             const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);  // NS: Toggle for timeouts
@@ -2238,7 +2239,8 @@
                             skip_evacuation: skipEvacuation,  // NS: Issue #22 - skip VM evacuation (NOT RECOMMENDED)
                             wait_for_reboot: waitForReboot,  // NS: GitHub #40
                             pause_on_evacuation_error: pauseOnEvacError,  // NS: GitHub #40
-                            evacuation_timeout: evacuationTimeout
+                            evacuation_timeout: evacuationTimeout,
+                            reboot_timeout: rebootTimeout  // NS Apr 2026 (#328): per-cluster override for slow-boot nodes
                         })
                     });
                     const data = await response.json();
@@ -3226,6 +3228,29 @@
                                                 </select>
                                                 <p className="text-xs text-gray-500 mt-1">
                                                     {t('evacuationTimeoutHint') || 'How long to wait for VMs to migrate before timeout'}
+                                                </p>
+                                            </div>
+
+                                            {/* NS Apr 2026 (#328): reboot timeout -- slow-boot nodes (Ceph OSDs) need more than 10min */}
+                                            <div>
+                                                <label className="text-xs text-gray-400 block mb-1">
+                                                    {t('rebootTimeout') || 'Reboot / Online Timeout'} ({t('seconds') || 'seconds'})
+                                                </label>
+                                                <select
+                                                    value={rebootTimeout}
+                                                    onChange={(e) => setRebootTimeout(parseInt(e.target.value))}
+                                                    className="w-full bg-proxmox-darker border border-proxmox-border rounded px-3 py-1.5 text-sm text-white"
+                                                    disabled={!waitForReboot}
+                                                >
+                                                    <option value={300}>5 {t('minutes') || 'minutes'}</option>
+                                                    <option value={600}>10 {t('minutes') || 'minutes'} ({t('default') || 'default'})</option>
+                                                    <option value={1200}>20 {t('minutes') || 'minutes'}</option>
+                                                    <option value={1800}>30 {t('minutes') || 'minutes'}</option>
+                                                    <option value={3600}>1 {t('hour') || 'hour'}</option>
+                                                    <option value={7200}>2 {t('hours') || 'hours'}</option>
+                                                </select>
+                                                <p className="text-xs text-gray-500 mt-1">
+                                                    {t('rebootTimeoutHint') || 'How long to wait for a node to come back online after reboot. Extend this if you run Ceph OSDs or have many disks.'}
                                                 </p>
                                             </div>
                                         </div>

@@ -6193,14 +6193,25 @@
                                                 <Icons.Book className="text-blue-400" />
                                                 <span className="text-sm text-gray-300">Documentation</span>
                                             </a>
-                                            <a href="mailto:sponsor@pegaprox.com" 
+                                            <a href="mailto:sponsor@pegaprox.com"
                                                 className="flex items-center gap-2 p-3 bg-proxmox-darker rounded-lg hover:bg-proxmox-hover transition-colors">
                                                 <Icons.Heart className="text-pink-400" />
                                                 <span className="text-sm text-gray-300">Sponsor</span>
                                             </a>
                                         </div>
+                                        {/* LW Apr 2026: OpenCollective contribute button — prefer this over the mailto for recurring support */}
+                                        <div className="mt-4 flex justify-center">
+                                            <a href="https://opencollective.com/pegaprox"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                title="Contribute on Open Collective">
+                                                <img src="/images/oc_contribute_button.png"
+                                                    alt="Contribute to our Collective"
+                                                    className="h-9 w-auto hover:opacity-90 transition-opacity" />
+                                            </a>
+                                        </div>
                                     </div>
-                                    
+
                                     {/* License */}
                                     <div className="text-center text-sm text-gray-500 space-y-1">
                                         <p>PegaProx is open source software licensed under the AGPL-3.0 License.</p>

@@ -1,18 +1,16 @@
 {
-    "version": "0.9.6.1",
-    "build": "2026.04.14",
-    "release_date": "2026-04-14",
+    "version": "0.9.7",
+    "build": "2026.04.19",
+    "release_date": "2026-04-19",
     "changelog": [
-        "PBS Update Manager — check APT updates on Backup Servers (#240)",
-        "24h/12h time format toggle in user profile (#215)",
-        "VM wizard: filter disk formats by storage type, ZFS/LVM show raw only (#307)",
-        "VM wizard: searchable ISO dropdown, tab validation, scsihw fix (#304, #305, #306)",
-        "Email-style usernames now allowed for login (#228)",
-        "OIDC multi-group role mapping picks highest role (#293)",
-        "ESXi migration: pre-flight tool check + clearer error messages (#311)",
-        "Corporate Dark: fix gray-on-gray inputs, global search background (#303, #308)",
-        "KSM sharing display, collapsible nodes, back button localized (#298, #299, #302)",
-        "Remove light theme from Modern Layout, auto-apply corporate theme on switch"
+        "SSH reachability: corosync-VLAN setups now resolve the real mgmt IP for all node ops (#324)",
+        "Node Hardening: PDF/PNG export of CIS/Lynis/STIG/PegaProx audit reports",
+        "KSM Sharing visible in Node Summary, always shown (matches native PVE UI)",
+        "CVE Scanner: failed-scan nodes no longer show as green '0 CVEs' — grey dash with failed count",
+        "CVE Scanner: breathing room in corporate layout (taller stat cards, bigger gap)",
+        "Corporate dashboard: single-node clusters show 'Standalone' badge instead of 'Quorum verloren' (#326)",
+        "Disk Create modal: dropdown click no longer dismisses the modal (#323)",
+        "Translations: verbose audit, KSM sharing, snooze controls across DE/EN/FR/ES/PT/KO"
     ],
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
@@ -25,6 +23,7 @@
         "README.md",
         "deploy.sh",
         "images/favicon.ico",
+        "images/oc_contribute_button.png",
         "images/pegaprox.png",
         "images/sponsors/sponsor1.png",
         "images/sponsors/sponsor2.png",
@@ -191,15 +190,15 @@
         "plugins/status_page/status.html"
     ],
     "prev_changelog": [
-        "Predictive Load Balancing with CPU compatibility mode (DRS-style)",
-        "ESXi migration wizard — 3-step config with 28 options, disk/BIOS fixes (#222)",
-        "ISO/Template Sync across cluster nodes for iSCSI-only setups",
-        "Push Notifications plugin — Ntfy + Apprise support (#213)",
-        "Client Portal: ISO mount, Force Stop, OIDC/LDAP login, dashboard overview",
-        "Status Page: incidents, uptime tracking, maintenance banner, SVG badge",
-        "PDF export template (jsPDF) for reports, CVE scans, syslog",
-        "User folders, pagination, syslog FTS5 search (#287, gyptazy)",
-        "security: 12 hardening fixes (TOTP, XSS, rate limiting, session binding, SSRF)"
+        "PBS Update Manager — check APT updates on Backup Servers (#240)",
+        "24h/12h time format toggle in user profile (#215)",
+        "VM wizard: filter disk formats by storage type, ZFS/LVM show raw only (#307)",
+        "VM wizard: searchable ISO dropdown, tab validation, scsihw fix (#304, #305, #306)",
+        "Email-style usernames now allowed for login (#228)",
+        "OIDC multi-group role mapping picks highest role (#293)",
+        "ESXi migration: pre-flight tool check + clearer error messages (#311)",
+        "Corporate Dark: fix gray-on-gray inputs, global search background (#303, #308)",
+        "Remove light theme from Modern Layout, auto-apply corporate theme on switch"
     ],
     "breaking_changes": []
 }

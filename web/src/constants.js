@@ -12,7 +12,7 @@
         // const API_URL = 'https://pegaprox.internal/api' // old staging
         
         // NS: Central version constant - keep in sync with backend PEGAPROX_VERSION
-        const PEGAPROX_VERSION = "Beta 0.9.6.1";
+        const PEGAPROX_VERSION = "Beta 0.9.7";
         const DEBUG = false; // set true for verbose logging
 
         // NS: global time formatting — reads user pref from localStorage
@@ -46,6 +46,7 @@
             'Pacific/Auckland', 'Pacific/Fiji',
             'Africa/Cairo', 'Africa/Johannesburg', 'Africa/Lagos',
         ];
+
 
         // =====================================================
         // TRANSLATION SYSTEM

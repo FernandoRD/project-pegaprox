@@ -2335,6 +2335,57 @@
             const xhmSelectedMigrationRef = useRef(null);
             const lastReconnectToast = useRef({});  // cluster_id -> timestamp, avoid toast spam
 
+            // LW Apr 2026: monthly sponsor modal for admins (optional 90-day snooze).
+            // storage: pegaprox_sponsor_v2:<user> = timestamp when it's allowed to show again
+            const [showSponsorNag, setShowSponsorNag] = useState(false);
+            const [sponsorSecondsLeft, setSponsorSecondsLeft] = useState(15);
+            const [sponsorSnooze, setSponsorSnooze] = useState(false);
+            const sponsorTickRef = useRef(null);
+            const _DAY_MS = 86400000;
+            const sponsorKeyRef = useRef('');
+            useEffect(() => {
+                if (!user || !isAdmin) return;
+                const key = `pegaprox_sponsor_v2:${user.username || user.id || 'anon'}`;
+                sponsorKeyRef.current = key;
+                try {
+                    const next = parseInt(localStorage.getItem(key) || '0', 10);
+                    if (next && next > Date.now()) return;   // still in snooze window
+                } catch (_) { return; /* privacy mode / disabled storage */ }
+                const launch = setTimeout(() => {
+                    setShowSponsorNag(true);
+                    setSponsorSecondsLeft(15);
+                    setSponsorSnooze(false);
+                    // baseline: if user just ignores + closes tab, don't show again for 30d
+                    try { localStorage.setItem(key, String(Date.now() + 30 * _DAY_MS)); } catch (_) {}
+                    sponsorTickRef.current = setInterval(() => {
+                        setSponsorSecondsLeft(prev => {
+                            if (prev <= 1) {
+                                clearInterval(sponsorTickRef.current);
+                                sponsorTickRef.current = null;
+                                return 0;
+                            }
+                            return prev - 1;
+                        });
+                    }, 1000);
+                }, 800);
+                return () => {
+                    clearTimeout(launch);
+                    if (sponsorTickRef.current) clearInterval(sponsorTickRef.current);
+                };
+            }, [user, isAdmin]);
+
+            // called when the user clicks Maybe later OR the OC button
+            const dismissSponsorNag = () => {
+                try {
+                    const days = sponsorSnooze ? 90 : 30;
+                    if (sponsorKeyRef.current) {
+                        localStorage.setItem(sponsorKeyRef.current, String(Date.now() + days * _DAY_MS));
+                    }
+                } catch (_) {}
+                setShowSponsorNag(false);
+                setSponsorSnooze(false);
+            };
+
             // NS: auto-clear topology/xhm sidebar when navigating to something else
             useEffect(() => { if (selectedCluster || selectedPBS || selectedVMware || selectedGroup) { setSidebarTopology(false); setSidebarXHM(false); } }, [selectedCluster, selectedPBS, selectedVMware, selectedGroup]);
 
@@ -9761,6 +9812,82 @@
                                                                 );
                                                             };
 
+                                                            // MK Apr 2026: export buttons mirror CVE scanner pattern
+                                                            const exportHardenPng = () => {
+                                                                const el = document.getElementById('harden-report-content');
+                                                                if (!el) return;
+                                                                const doCapture = () => {
+                                                                    window.html2canvas(el, {backgroundColor: '#111a21', scale: 2, useCORS: true}).then(canvas => {
+                                                                        const a = document.createElement('a');
+                                                                        a.download = `pegaprox-hardening-${hardenNode || 'node'}-${new Date().toISOString().slice(0,10)}.png`;
+                                                                        a.href = canvas.toDataURL('image/png');
+                                                                        a.click();
+                                                                    });
+                                                                };
+                                                                if (window.html2canvas) { doCapture(); return; }
+                                                                const s = document.createElement('script');
+                                                                s.src = '/static/js/html2canvas.min.js';
+                                                                s.onload = doCapture;
+                                                                s.onerror = () => { const s2 = document.createElement('script'); s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'; s2.onload = doCapture; document.head.appendChild(s2); };
+                                                                document.head.appendChild(s);
+                                                            };
+                                                            const exportHardenPdf = () => {
+                                                                const sources = [
+                                                                    { name: 'CIS Debian Linux 13 Benchmark', ctrls: cisControls, src: 'cis' },
+                                                                    { name: 'Lynis Security Auditing', ctrls: lynisControls, src: 'lynis' },
+                                                                    { name: 'STIG — DoD Security Technical Implementation Guide', ctrls: stigControls, src: 'stig' },
+                                                                    { name: 'PegaProx ' + (t('recommendations') || 'Recommendations'), ctrls: pegaControls, src: 'pega' },
+                                                                ];
+                                                                const statusLbl = (applied, failed) => failed ? (t('failed') || 'Failed') : applied ? (t('applied') || 'Applied') : (t('notApplied') || 'Not applied');
+                                                                const blocks = [
+                                                                    { type: 'stats', data: [
+                                                                        { label: t('controlsActive') || 'Controls active', value: `${appliedCount}/${totalCount}`, color: appliedCount === totalCount ? '#2a9f2a' : '#c89600' },
+                                                                        { label: t('notApplied') || 'Not applied', value: String(totalCount - appliedCount), color: '#dc3232' },
+                                                                        { label: t('selected') || 'Selected', value: String(selectedCount), color: '#3c82c8' },
+                                                                    ]},
+                                                                    { type: 'spacer', height: 4 },
+                                                                ];
+                                                                // per-source tables
+                                                                sources.forEach(src => {
+                                                                    const rows = Object.entries(src.ctrls).map(([id, info]) => {
+                                                                        const v = controls[id];
+                                                                        const isObj = v && typeof v === 'object';
+                                                                        const applied = isObj ? v.status === true : v === true;
+                                                                        const failed = hardenResults?.[id]?.success === false;
+                                                                        return [info.ref || '-', info.title || id, statusLbl(applied, failed), (info.impact || '').slice(0, 90)];
+                                                                    });
+                                                                    blocks.push({
+                                                                        type: 'table',
+                                                                        title: src.name,
+                                                                        columns: [t('reference') || 'Ref', t('control') || 'Control', t('status') || 'Status', t('pveImpact') || 'PVE Impact'],
+                                                                        rows
+                                                                    });
+                                                                });
+                                                                // optional: verbose evidence section if available
+                                                                const verboseItems = Object.entries(controls).filter(([, v]) => v && typeof v === 'object' && (v.evidence || v.command));
+                                                                if (verboseItems.length > 0) {
+                                                                    blocks.push({ type: 'spacer', height: 4 });
+                                                                    const allTitles = {...cisControls, ...lynisControls, ...stigControls, ...pegaControls};
+                                                                    blocks.push({
+                                                                        type: 'table',
+                                                                        title: t('auditEvidence') || 'Audit evidence',
+                                                                        columns: [t('control') || 'Control', t('checkCommand') || 'Check command', t('actualState') || 'Actual state'],
+                                                                        rows: verboseItems.map(([id, v]) => [
+                                                                            (allTitles[id]?.title || id).slice(0, 40),
+                                                                            String(v.command || '').slice(0, 160),
+                                                                            String(v.evidence || '').slice(0, 220)
+                                                                        ])
+                                                                    });
+                                                                }
+                                                                generatePegaProxPDF({
+                                                                    title: t('hardenReportTitle') || 'Node Hardening Report',
+                                                                    subtitle: hardenNode,
+                                                                    clusterName: selectedCluster?.name,
+                                                                    filename: `pegaprox-hardening-${hardenNode || 'node'}-${new Date().toISOString().slice(0,10)}.pdf`,
+                                                                    content: blocks
+                                                                });
+                                                            };
+
                                                             return (
                                                             <>
                                                                 {/* summary bar */}
@@ -9777,6 +9904,15 @@
                                                                             <div className={`h-2 rounded-full transition-all ${appliedCount === totalCount ? 'bg-green-500' : appliedCount > totalCount / 2 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{width: `${totalCount > 0 ? (appliedCount / totalCount * 100) : 0}%`}} />
                                                                         </div>
                                                                     </div>
+                                                                    {/* MK Apr 2026: export buttons */}
+                                                                    <button onClick={exportHardenPng}
+                                                                        className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500 whitespace-nowrap"
+                                                                        title={t('exportPng') || 'Export as PNG'}
+                                                                    >PNG</button>
+                                                                    <button onClick={exportHardenPdf}
+                                                                        className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500 whitespace-nowrap"
+                                                                        title={t('exportPdf') || 'Export as PDF'}
+                                                                    >PDF</button>
                                                                     <button
                                                                         onClick={applyHardening}
                                                                         disabled={hardenApplying || selectedCount === 0}
@@ -9788,6 +9924,8 @@
                                                                     </button>
                                                                 </div>
 
+                                                                {/* MK Apr 2026: id wrapper so PNG export can target the whole thing */}
+                                                                <div id="harden-report-content" className="space-y-4">
                                                                 {/* CIS Benchmark section */}
                                                                 <div>
                                                                     <h3 className="text-sm font-semibold text-blue-400 mb-2 flex items-center gap-2">
@@ -9833,6 +9971,7 @@
                                                                     <div className="space-y-2">
                                                                         {Object.entries(pegaControls).map(([id, info]) => renderControl(id, info, 'pega'))}
                                                                     </div>
+                                                                </div>
                                                                 </div>
 
                                                                 {/* select all / none helper */}
@@ -10268,7 +10407,7 @@
 
                                                         {/* Summary cards */}
                                                         {cveResults && !cveScanLoading && (
-                                                            <div id="cve-report-content">
+                                                            <div id="cve-report-content" className="space-y-6">
                                                                 {/* debsecan install banner - only if not installed */}
                                                                 {!cveResults.summary?.debsecan_available && (
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
@@ -10304,31 +10443,65 @@
                                                                     </div>
                                                                 )}
 
-                                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 text-center">
-                                                                        <div className="text-3xl font-bold text-blue-400">{cveResults.summary?.nodes_scanned || 0}</div>
-                                                                        <div className="text-sm text-gray-500">{t('nodesScanned') || 'Nodes Scanned'}</div>
-                                                                    </div>
-                                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 text-center">
-                                                                        <div className={`text-3xl font-bold ${(cveResults.summary?.total_cves || 0) > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                                                                            {cveResults.summary?.total_cves || cveResults.summary?.total_security || 0}
+                                                                {/* NS Apr 2026: failed scans (SSH down, offline, etc.) shouldn't look green —
+                                                                    the previous summary showed "0 CVEs" in green even when every node failed. */}
+                                                                {(() => {
+                                                                    const totalNodes = cveResults.summary?.nodes_scanned || 0;
+                                                                    const failedNodes = (cveResults.nodes || []).filter(n => n.error).length;
+                                                                    const okNodes = totalNodes - failedNodes;
+                                                                    const allFailed = totalNodes > 0 && okNodes === 0;
+                                                                    const nodesClean = cveResults.summary?.nodes_ok || 0;
+                                                                    const isDebsecan = !!cveResults.summary?.debsecan_available;
+                                                                // LW Apr 2026: give corporate a bit more breathing room -
+                                                                // the default density made the stats + rows feel crammed
+                                                                const cardCls = `bg-proxmox-card border border-proxmox-border rounded-xl text-center ${isCorporate ? 'px-4 py-5' : 'p-4'}`;
+                                                                const numCls = 'text-3xl font-bold';
+                                                                const lblCls = `text-gray-500 ${isCorporate ? 'text-sm mt-1.5' : 'text-sm mt-1'}`;
+                                                                return (
+                                                                <div className={`grid grid-cols-2 md:grid-cols-4 ${isCorporate ? 'gap-5' : 'gap-4'}`}>
+                                                                    <div className={cardCls}>
+                                                                        <div className={`${numCls} ${failedNodes > 0 ? 'text-orange-400' : 'text-blue-400'}`}>
+                                                                            {okNodes}/{totalNodes}
                                                                         </div>
-                                                                        <div className="text-sm text-gray-500">{cveResults.summary?.debsecan_available ? 'CVEs' : (t('securityUpdates') || 'Security Updates')}</div>
+                                                                        <div className={lblCls}>{t('nodesScanned') || 'Nodes Scanned'}</div>
+                                                                        {failedNodes > 0 && (
+                                                                            <div className="text-[11px] text-red-400 mt-1">{failedNodes} {t('scanFailed') || 'failed'}</div>
+                                                                        )}
                                                                     </div>
-                                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 text-center">
-                                                                        <div className="text-3xl font-bold text-yellow-400">{cveResults.summary?.total_updates || 0}</div>
-                                                                        <div className="text-sm text-gray-500">{t('totalUpdates') || 'Total Updates'}</div>
+                                                                    <div className={cardCls}>
+                                                                        {allFailed ? (
+                                                                            <div className={`${numCls} text-gray-500`}>—</div>
+                                                                        ) : (
+                                                                            <div className={`${numCls} ${(cveResults.summary?.total_cves || cveResults.summary?.total_security || 0) > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                                                                                {cveResults.summary?.total_cves || cveResults.summary?.total_security || 0}
+                                                                            </div>
+                                                                        )}
+                                                                        <div className={lblCls}>{isDebsecan ? 'CVEs' : (t('securityUpdates') || 'Security Updates')}</div>
                                                                     </div>
-                                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 text-center">
-                                                                        <div className={`text-3xl font-bold ${cveResults.summary?.nodes_ok === cveResults.summary?.nodes_scanned ? 'text-green-400' : 'text-orange-400'}`}>
-                                                                            {cveResults.summary?.nodes_ok || 0}/{cveResults.summary?.nodes_scanned || 0}
-                                                                        </div>
-                                                                        <div className="text-sm text-gray-500">{t('nodesClean') || 'Nodes Clean'}</div>
+                                                                    <div className={cardCls}>
+                                                                        {allFailed ? (
+                                                                            <div className={`${numCls} text-gray-500`}>—</div>
+                                                                        ) : (
+                                                                            <div className={`${numCls} text-yellow-400`}>{cveResults.summary?.total_updates || 0}</div>
+                                                                        )}
+                                                                        <div className={lblCls}>{t('totalUpdates') || 'Total Updates'}</div>
+                                                                    </div>
+                                                                    <div className={cardCls}>
+                                                                        {allFailed ? (
+                                                                            <div className={`${numCls} text-gray-500`}>—</div>
+                                                                        ) : (
+                                                                            <div className={`${numCls} ${nodesClean === okNodes && okNodes > 0 ? 'text-green-400' : 'text-orange-400'}`}>
+                                                                                {nodesClean}/{okNodes}
+                                                                            </div>
+                                                                        )}
+                                                                        <div className={lblCls}>{t('nodesClean') || 'Nodes Clean'}</div>
                                                                     </div>
                                                                 </div>
+                                                                );
+                                                                })()}
 
                                                                 {/* Per-node results */}
-                                                                <div className="space-y-3">
+                                                                <div className={isCorporate ? 'space-y-3' : 'space-y-3'}>
                                                                     {(cveResults.nodes || []).map((node, nIdx) => (
                                                                         <div key={nIdx} className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                                             <button
@@ -14873,6 +15046,17 @@
                                     <SponsorSlot key={num} num={num} />
                                 ))}
                             </div>
+                            {/* LW Apr 2026: OpenCollective contribute CTA under sponsor logos */}
+                            <div className="flex justify-center mt-4">
+                                <a href="https://opencollective.com/pegaprox"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Contribute on Open Collective">
+                                    <img src="/images/oc_contribute_button.png"
+                                        alt="Contribute to our Collective"
+                                        className="h-8 w-auto hover:opacity-90 transition-opacity" />
+                                </a>
+                            </div>
                             <div className="text-center mt-4 text-xs text-gray-600">
                                 <p>PegaProx {PEGAPROX_VERSION} • {t('madeWithLove') || 'Made with ❤️ for the Proxmox community'}</p>
                             </div>
@@ -15911,6 +16095,123 @@
                             />
                         );
                     })()}
+
+                    {/* LW Apr 2026: one-time centered sponsor modal for admins. 15s forced
+                        read time. Rendered via portal because the corporate layout root has
+                        transforms that break `position: fixed` on descendants (same reason
+                        the toast system uses a portal above). */}
+                    {showSponsorNag && ReactDOM.createPortal(
+                        <div style={{
+                                position: 'fixed',
+                                inset: 0,
+                                zIndex: 99998,
+                                background: 'rgba(0,0,0,0.72)',
+                                backdropFilter: 'blur(3px)',
+                                WebkitBackdropFilter: 'blur(3px)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: 16
+                             }}>
+                            <div style={{
+                                    width: '100%',
+                                    maxWidth: 520,
+                                    borderRadius: 16,
+                                    overflow: 'hidden',
+                                    boxShadow: '0 25px 80px -10px rgba(0,0,0,0.8)',
+                                    background: 'linear-gradient(135deg, #1a2530 0%, #0f1923 100%)',
+                                    border: '1px solid rgba(236,72,153,0.35)',
+                                    animation: 'sponsorNagPopIn 0.35s cubic-bezier(0.34, 1.2, 0.64, 1) both'
+                                 }}>
+                                <div style={{padding: '28px 28px 20px', textAlign: 'center'}}>
+                                    <div style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            width: 64,
+                                            height: 64,
+                                            borderRadius: 16,
+                                            marginBottom: 16,
+                                            background: 'rgba(236,72,153,0.14)',
+                                            border: '1px solid rgba(236,72,153,0.3)'
+                                         }}>
+                                        <Icons.Heart className="w-8 h-8 text-pink-400" />
+                                    </div>
+                                    <h2 style={{fontSize: 24, fontWeight: 700, color: '#fff', marginBottom: 12, lineHeight: 1.2}}>
+                                        {t('sponsorNagTitle') || 'Help keep PegaProx alive'}
+                                    </h2>
+                                    <p style={{fontSize: 14, color: '#cbd5e1', lineHeight: 1.6}}>
+                                        {t('sponsorNagBody') || 'PegaProx is a passion project — we pay for the servers, domains and all those dev hours out of our own pockets. If this tool saves you time and you can spare a bit, we would be incredibly grateful for a tip on Open Collective. Every contribution, big or small, keeps the lights on!'}
+                                    </p>
+                                </div>
+                                <div style={{padding: '0 28px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14}}>
+                                    <a href="https://opencollective.com/pegaprox"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={dismissSponsorNag}
+                                        title={t('sponsorNagCta') || 'Support us on Open Collective'}>
+                                        <img src="/images/oc_contribute_button.png"
+                                            alt={t('sponsorNagCta') || 'Support us on Open Collective'}
+                                            style={{height: 40, width: 'auto', transition: 'opacity 0.2s'}}
+                                            onMouseEnter={e => e.currentTarget.style.opacity = '0.9'}
+                                            onMouseLeave={e => e.currentTarget.style.opacity = '1'} />
+                                    </a>
+                                    <button
+                                        disabled={sponsorSecondsLeft > 0}
+                                        onClick={dismissSponsorNag}
+                                        style={{
+                                            padding: '9px 20px',
+                                            borderRadius: 8,
+                                            fontSize: 14,
+                                            fontWeight: 500,
+                                            width: '100%',
+                                            maxWidth: 280,
+                                            transition: 'all 0.2s',
+                                            background: sponsorSecondsLeft > 0 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.08)',
+                                            color: sponsorSecondsLeft > 0 ? 'rgba(255,255,255,0.4)' : '#fff',
+                                            cursor: sponsorSecondsLeft > 0 ? 'not-allowed' : 'pointer',
+                                            border: sponsorSecondsLeft > 0 ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(255,255,255,0.15)'
+                                        }}>
+                                        {sponsorSecondsLeft > 0
+                                            ? `${t('sponsorNagDismiss') || 'Maybe later'} (${sponsorSecondsLeft}s)`
+                                            : (t('sponsorNagDismiss') || 'Maybe later')}
+                                    </button>
+                                    {/* LW Apr 2026: 90-day snooze checkbox, clickable only after the 15s read period */}
+                                    <label style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: 8,
+                                            fontSize: 12,
+                                            color: sponsorSecondsLeft > 0 ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.55)',
+                                            cursor: sponsorSecondsLeft > 0 ? 'not-allowed' : 'pointer',
+                                            userSelect: 'none'
+                                         }}>
+                                        <input type="checkbox"
+                                            checked={sponsorSnooze}
+                                            disabled={sponsorSecondsLeft > 0}
+                                            onChange={e => setSponsorSnooze(e.target.checked)}
+                                            style={{
+                                                width: 14,
+                                                height: 14,
+                                                accentColor: '#ec4899',
+                                                cursor: sponsorSecondsLeft > 0 ? 'not-allowed' : 'pointer'
+                                            }} />
+                                        {t('sponsorNagSnooze90') || "Don't show again for 90 days"}
+                                    </label>
+                                </div>
+                                {/* countdown bar: fills from 0 -> 100% as the 15s elapses */}
+                                <div style={{height: 4, background: 'rgba(0,0,0,0.4)', position: 'relative', overflow: 'hidden'}}>
+                                    <div style={{
+                                            height: '100%',
+                                            transition: 'width 1s linear',
+                                            width: `${((15 - sponsorSecondsLeft) / 15) * 100}%`,
+                                            background: 'linear-gradient(90deg, #ec4899 0%, #f472b6 100%)'
+                                         }}></div>
+                                </div>
+                            </div>
+                        </div>,
+                        document.body
+                    )}
 
                     {/* Task Bar */}
                     {showTaskBar && (

@@ -788,10 +788,48 @@
             const [loading, setLoading] = useState(true);
             const [rotating, setRotating] = useState(false);
             const [checking, setChecking] = useState(false);
+            // NS Apr 2026 — local mirror of two server settings we expose here:
+            // audit retention days + air-gap mode. Loaded from /api/settings/server,
+            // saved via the same endpoint (POST JSON branch).
+            const [hardening, setHardening] = useState({ audit_retention_days: 90, air_gap_mode: false });
+            const [hardeningSaving, setHardeningSaving] = useState(false);
 
             useEffect(() => {
                 fetchComplianceStatus();
+                fetchHardeningSettings();
             }, []);
+
+            const fetchHardeningSettings = async () => {
+                try {
+                    const r = await fetch(`${API_URL}/settings/server`, { credentials: 'include', headers: getAuthHeaders() });
+                    if (r.ok) {
+                        const d = await r.json();
+                        setHardening({
+                            audit_retention_days: d.audit_retention_days || 90,
+                            air_gap_mode: !!d.air_gap_mode,
+                        });
+                    }
+                } catch (_) {}
+            };
+
+            const saveHardeningSettings = async (patch) => {
+                setHardeningSaving(true);
+                try {
+                    const next = { ...hardening, ...patch };
+                    setHardening(next);
+                    const r = await fetch(`${API_URL}/settings/server`, {
+                        method: 'POST', credentials: 'include',
+                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify(patch)
+                    });
+                    if (r.ok) addToast(t('settingsSaved') || 'Saved', 'success');
+                    else addToast('Save failed', 'error');
+                } catch (e) {
+                    addToast('Save failed: ' + e, 'error');
+                } finally {
+                    setHardeningSaving(false);
+                }
+            };
 
             const fetchComplianceStatus = async () => {
                 setLoading(true);
@@ -879,6 +917,66 @@
 
             return (
                 <div className="space-y-6">
+                    {/* NS Apr 2026 — Hardening / Compliance settings (audit retention + air-gap).
+                        BSI Grundschutz / VS-NfD / NIS2 customers want these front-and-center
+                        in the Compliance tab, not buried under Server settings. */}
+                    <div className="bg-proxmox-dark rounded-xl p-6 border border-proxmox-border space-y-5">
+                        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                            <Icons.Lock /> {t('complianceSettings') || 'Compliance & Hardening'}
+                        </h3>
+
+                        {/* Audit retention */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-200 mb-1">
+                                {t('auditRetention') || 'Audit log retention (days)'}
+                            </label>
+                            <div className="flex items-center gap-3">
+                                <input type="number" min="30" max="3650"
+                                    value={hardening.audit_retention_days}
+                                    onChange={e => setHardening({...hardening, audit_retention_days: parseInt(e.target.value) || 90})}
+                                    className="w-32 px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded text-white text-sm" />
+                                <button
+                                    onClick={() => saveHardeningSettings({ audit_retention_days: hardening.audit_retention_days })}
+                                    disabled={hardeningSaving}
+                                    className="px-3 py-2 bg-proxmox-orange/80 hover:bg-proxmox-orange text-white rounded text-sm disabled:opacity-50">
+                                    {hardeningSaving ? '...' : (t('save') || 'Save')}
+                                </button>
+                            </div>
+                            <p className="text-xs text-gray-500 mt-1">
+                                {t('auditRetentionHint') || 'BSI IT-Grundschutz recommends ≥ 180 days. NIS2 / KRITIS often require 365+. Default: 90.'}
+                            </p>
+                        </div>
+
+                        {/* Air-gap mode */}
+                        <div className="pt-4 border-t border-proxmox-border">
+                            <div className="flex items-center justify-between gap-4">
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-medium text-white">{t('airGapMode') || 'Air-gap mode'}</p>
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        {t('airGapModeDesc') || 'Disables update checks, OpenCollective links, sponsor logos and external CVE lookups. For VS-NfD / classified networks where outbound HTTP is forbidden.'}
+                                    </p>
+                                </div>
+                                <button
+                                    onClick={() => saveHardeningSettings({ air_gap_mode: !hardening.air_gap_mode })}
+                                    disabled={hardeningSaving}
+                                    className={`relative w-12 h-6 rounded-full transition-colors shrink-0 ${
+                                        hardening.air_gap_mode ? 'bg-emerald-500' : 'bg-proxmox-darker border border-proxmox-border'
+                                    } disabled:opacity-50`}>
+                                    <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                                        hardening.air_gap_mode ? 'left-7' : 'left-1'
+                                    }`} />
+                                </button>
+                            </div>
+                            {hardening.air_gap_mode && (
+                                <div className="mt-3 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+                                    <p className="text-xs text-yellow-300">
+                                        ⚠ {t('airGapModeActive') || 'Active — PegaProx will not contact external services. OIDC auto-discovery against public IdPs may break; pin discovery URLs to internal endpoints.'}
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
                     {/* Compliance Score */}
                     <div className="bg-proxmox-dark rounded-xl p-6 border border-proxmox-border">
                         <div className="flex items-center justify-between mb-4">

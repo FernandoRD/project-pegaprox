@@ -99,6 +99,11 @@ class V2PMigrationTask:
         # suspended-forever limbo on ESXi. Track so cleanup can revive it.
         self._source_suspended = False
         self._extra_snapshots = []  # named snapshots beyond the migration snap
+        # NS Apr 2026 — opt-in offline VirtIO driver injection (virt-v2v style).
+        # Default off — VMware Workloads boot fine on Proxmox via vmxnet3+pvscsi
+        # compatibility. Enable to pre-stage Windows for native virtio-scsi/virtio-net.
+        self.install_virtio_drivers = bool(self.config.get('install_virtio_drivers', False))
+        self.virtio_iso_path = self.config.get('virtio_iso_path', '') or ''
     
     def log(self, msg):
         ts = datetime.now().strftime('%H:%M:%S')
@@ -836,6 +841,8 @@ def _run_v2p_migration(task):
                         timeout=15)
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
+                try: _inject_virtio_drivers(pve_mgr, task)
+                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -989,6 +996,8 @@ def _run_v2p_migration(task):
 
             # NS Apr 2026 — UEFI fallback loader so OVMF auto-boots Windows post-V2P
             _register_uefi_fallback_loader(pve_mgr, task)
+            try: _inject_virtio_drivers(pve_mgr, task)
+            except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
 
             _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
 
@@ -1153,6 +1162,8 @@ def _run_v2p_migration(task):
                         timeout=15)
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
+                try: _inject_virtio_drivers(pve_mgr, task)
+                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -1310,6 +1321,8 @@ def _run_v2p_migration(task):
         if str(getattr(task, 'config', {}).get('bios', '')).lower() == 'ovmf' or True:
             # always try; helper bails harmlessly if disk has no Microsoft loader
             _register_uefi_fallback_loader(pve_mgr, task)
+        try: _inject_virtio_drivers(pve_mgr, task)
+        except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
 
         if task.start_after:
             task.log("Starting VM on Proxmox...")
@@ -1459,6 +1472,392 @@ def _register_uefi_fallback_loader(pve_mgr, task):
         task.log(f"EFI fallback registration failed (non-fatal): {e}")
 
 
+# NS Apr 2026 — Offline VirtIO driver injection. Opt-in. Lifted from virt-v2v's
+# approach but slimmed down for our pipeline: we already have the disks materialized
+# as Proxmox LVs by this point, so we losetup+kpartx them, ntfs-3g mount the largest
+# NTFS partition, copy the right SYS/INF/CAT files out of virtio-win.iso, and merge
+# a registry stub into the SYSTEM hive that flags the storage drivers as boot-critical.
+# After this, the user can switch scsihw to virtio-scsi-pci (or net0 to virtio) without
+# Windows BSODing on next boot.
+#
+# Tools needed on the Proxmox node: kpartx, ntfs-3g, libhivex-bin (hivexregedit),
+# losetup. We auto-apt-install if missing (one-time cost ~5s).
+#
+# Source ISO: looked up in standard PVE template paths first, then user-configured path.
+# User can drop virtio-win.iso into /var/lib/vz/template/iso/ or any pvesm-managed iso storage.
+_VIRTIO_DRIVERS = ['viostor', 'vioscsi', 'NetKVM', 'Balloon', 'pvpanic', 'qemupciserial', 'vioserial', 'viorng']
+
+
+def _detect_windows_driver_subdir(version_str, build_str):
+    """Map detected Windows version/build to a virtio-win.iso subdirectory."""
+    v = (version_str or '').lower()
+    b = (build_str or '').strip()
+    # Build-number table is more reliable than ProductName which lies on Server SKUs
+    try:
+        b_int = int(b)
+    except Exception:
+        b_int = 0
+    # Server first (more specific), then client
+    if 'server 2025' in v or b_int >= 26100:
+        return '2k25/amd64'
+    if 'server 2022' in v or b_int == 20348:
+        return '2k22/amd64'
+    if 'server 2019' in v or b_int == 17763:
+        return '2k19/amd64'
+    if 'server 2016' in v or b_int == 14393:
+        return '2k16/amd64'
+    if 'server 2012 r2' in v or b_int == 9600:
+        return '2k12R2/amd64'
+    if 'server 2012' in v or b_int == 9200:
+        return '2k12/amd64'
+    if 'server 2008 r2' in v or b_int == 7601:
+        return '2k8R2/amd64'
+    if 'windows 11' in v or b_int >= 22000:
+        return 'w11/amd64'
+    if 'windows 10' in v or (10240 <= b_int <= 19999):
+        return 'w10/amd64'
+    if 'windows 8.1' in v or b_int == 9600:
+        return 'w8.1/amd64'
+    if 'windows 8' in v:
+        return 'w8/amd64'
+    if 'windows 7' in v or b_int == 7601:
+        return 'w7/amd64'
+    # Default — most modern guests
+    return 'w11/amd64'
+
+
+def _inject_virtio_drivers(pve_mgr, task):
+    """Offline-inject VirtIO drivers into the boot disk's Windows install.
+
+    Touches only the first attached disk (assumed boot). Returns True on success.
+    On any error we log + return False — never aborts the migration."""
+    if not getattr(task, 'install_virtio_drivers', False):
+        return False
+
+    node = task.target_node
+    # NS Apr 2026 — guard: if the Proxmox VM is already running we'd be writing
+    # into a live NTFS underneath the running guest = corruption. Skip cleanly.
+    try:
+        st = pve_mgr._api_get(
+            f"https://{pve_mgr.host}:8006/api2/json/nodes/{node}/qemu/{task.proxmox_vmid}/status/current")
+        running = (st.status_code == 200 and st.json().get('data', {}).get('status') == 'running')
+        if running:
+            task.log("[VirtIO] Skipped — VM is already running (sshfs_boot live-pivot path). "
+                     "Use transfer_mode=offline/auto/snapshot_zero for offline pre-staging, "
+                     "or install drivers post-boot via the virtio-win.iso CD-ROM.")
+            return False
+    except Exception:
+        pass  # if the status probe fails, fall through and try injection anyway
+
+    task.log("=== VirtIO driver injection (opt-in) ===")
+
+    # 1) Tooling. losetup + ntfsfix come with util-linux/ntfs-3g.
+    # python3-hivex for registry edits (Debian's libhivex-bin lacks hivexregedit
+    # so we use the Python binding which is also more robust + idempotent).
+    # qemu-utils ships qemu-nbd — needed for file-based targets (NFS qcow2 etc.).
+    # ceph-common (for `rbd map`) only installed on-demand inside the script
+    # when STYPE=rbd, since most clusters don't use Ceph.
+    rc, _, _ = _pve_node_exec(pve_mgr, node,
+        "python3 -c 'import hivex' 2>/dev/null && command -v ntfs-3g >/dev/null "
+        "&& command -v ntfsfix >/dev/null && command -v qemu-nbd >/dev/null",
+        timeout=10)
+    if rc != 0:
+        task.log("[VirtIO] Installing python3-hivex / ntfs-3g / qemu-utils (one-time)...")
+        rc_apt, out_apt, _ = _pve_node_exec(pve_mgr, node,
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
+            "python3-hivex ntfs-3g qemu-utils 2>&1 | tail -5",
+            timeout=180)
+        if rc_apt != 0:
+            task.log(f"[VirtIO] ✗ apt install failed: {str(out_apt or '')[-200:]}")
+            return False
+
+    # 2) Locate ISO. User-set path wins.
+    iso_candidates = []
+    if getattr(task, 'virtio_iso_path', ''):
+        iso_candidates.append(task.virtio_iso_path)
+    iso_candidates += [
+        "/var/lib/vz/template/iso/virtio-win.iso",
+        f"/mnt/pve/{task.target_storage}/template/iso/virtio-win.iso",
+        "/var/lib/pegaprox/virtio-win.iso",
+    ]
+    iso_path = None
+    for p in iso_candidates:
+        rc, _, _ = _pve_node_exec(pve_mgr, node, f"test -f {shlex.quote(p)}", timeout=5)
+        if rc == 0:
+            iso_path = p
+            break
+    if not iso_path:
+        task.log("[VirtIO] ⚠ virtio-win.iso not found — skipping. Searched: " + ", ".join(iso_candidates))
+        task.log("[VirtIO]   Hint: drop virtio-win.iso into /var/lib/vz/template/iso/ or set virtio_iso_path")
+        return False
+    task.log(f"[VirtIO] ISO: {iso_path}")
+
+    # 3) Build a single shell script — easier to follow + we get one rc back.
+    # NS Apr 2026 — storage-type-aware: lvm/iSCSI/zfs are already block devices,
+    # rbd needs `rbd map`, file-based (dir/nfs/cifs/cephfs/glusterfs/btrfs with qcow2)
+    # needs `qemu-nbd --connect`. After that, losetup -b 512 -fP wraps for 512b sectors.
+    vol_id = f"{task.target_storage}:vm-{task.proxmox_vmid}-disk-0"
+    rc, vol_path, _ = _pve_node_exec(pve_mgr, node,
+        f"pvesm path {shlex.quote(vol_id)} 2>/dev/null", timeout=10)
+    vol_path = str(vol_path or '').strip()
+    if not vol_path:
+        task.log("[VirtIO] ✗ Could not resolve boot disk path")
+        return False
+    # Detect storage type so the script knows which exposure path to take
+    rc_st, st_out, _ = _pve_node_exec(pve_mgr, node,
+        f"pvesm status --storage {shlex.quote(task.target_storage)} 2>/dev/null | tail -n +2 | awk '{{print $2}}'",
+        timeout=10)
+    storage_type = (str(st_out or '').strip().splitlines() or [''])[0].strip().lower()
+    task.log(f"[VirtIO] Target storage type: {storage_type or 'unknown'} ({vol_path})")
+
+    drivers_arg = ' '.join(_VIRTIO_DRIVERS)
+    script = (
+        "#!/bin/bash\n"
+        "set -u\n"
+        f"VOL={shlex.quote(vol_path)}\n"
+        f"VOL_ID={shlex.quote(vol_id)}\n"
+        f"STYPE={shlex.quote(storage_type)}\n"
+        f"ISO={shlex.quote(iso_path)}\n"
+        f"DRIVERS=\"{drivers_arg}\"\n"
+        "TMP=$(mktemp -d /tmp/v2p-virtio-XXXXXX)\n"
+        "ISO_MNT=\"$TMP/iso\"; WIN_MNT=\"$TMP/win\"; mkdir -p \"$ISO_MNT\" \"$WIN_MNT\"\n"
+        "LOOP=\"\"; NBD=\"\"; RBD=\"\"\n"
+        # NS Apr 2026 — cleanup unwinds losetup → qemu-nbd → rbd in correct order.
+        # Each branch is conditional, no-op if not used.
+        "cleanup(){ "
+        "  sync 2>/dev/null||true; "
+        "  umount \"$WIN_MNT\" 2>/dev/null||true; "
+        "  umount \"$ISO_MNT\" 2>/dev/null||true; "
+        "  [ -n \"$LOOP\" ] && losetup -d \"$LOOP\" 2>/dev/null||true; "
+        "  [ -n \"$NBD\" ] && qemu-nbd --disconnect \"$NBD\" 2>/dev/null||true; "
+        "  [ -n \"$RBD\" ] && rbd unmap \"$RBD\" 2>/dev/null||true; "
+        "  rm -rf \"$TMP\"; "
+        "}\n"
+        "trap cleanup EXIT\n"
+        "mount -o ro,loop \"$ISO\" \"$ISO_MNT\" || { echo 'ISO_MOUNT_FAILED'; exit 3; }\n"
+        # ── Expose target disk as a partitioned block device (BLK) ──
+        "BLK=\"\"\n"
+        "case \"$STYPE\" in\n"
+        # LVM family + iSCSI direct-LUN + ZFS zvol — already block-devices
+        "  lvm|lvmthin|iscsi|iscsidirect|zfspool|zfs)\n"
+        "    lvchange -ay \"$VOL\" 2>/dev/null||true\n"
+        "    [ -b \"$VOL\" ] || { echo \"NOT_A_BLOCK_DEVICE: $VOL\"; exit 2; }\n"
+        "    BLK=\"$VOL\"\n"
+        "    ;;\n"
+        # Ceph RBD — rbd map produces /dev/rbdN
+        "  rbd)\n"
+        "    command -v rbd >/dev/null || { echo 'rbd cli missing — apt install ceph-common'; "
+        "      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ceph-common >/dev/null 2>&1; }\n"
+        "    POOLIMG=$(echo \"$VOL_ID\" | sed 's|^[^:]*:||')\n"
+        "    POOL=$(echo \"$POOLIMG\" | cut -d/ -f1)\n"
+        "    IMG=$(echo \"$POOLIMG\" | cut -d/ -f2)\n"
+        "    [ -z \"$POOL\" ] || [ -z \"$IMG\" ] && { echo 'RBD_PARSE_FAILED'; exit 2; }\n"
+        "    BLK=$(rbd map -p \"$POOL\" \"$IMG\" 2>&1 | tail -1)\n"
+        "    [ -b \"$BLK\" ] || { echo \"RBD_MAP_FAILED: $BLK\"; exit 2; }\n"
+        "    RBD=\"$BLK\"\n"
+        "    ;;\n"
+        # File-based (qcow2 / raw on dir/NFS/CIFS/cephfs/glusterfs/btrfs) — qemu-nbd
+        "  dir|nfs|cifs|cephfs|glusterfs|btrfs)\n"
+        "    [ -f \"$VOL\" ] || { echo \"NOT_A_FILE: $VOL\"; exit 2; }\n"
+        "    command -v qemu-nbd >/dev/null || { echo 'qemu-nbd missing'; exit 2; }\n"
+        "    modprobe nbd max_part=16 2>/dev/null||true\n"
+        "    NBD=\"\"\n"
+        "    for n in $(seq 0 15); do "
+        "      [ -b \"/dev/nbd$n\" ] || continue; "
+        "      if qemu-nbd --connect=\"/dev/nbd$n\" --read-only=off \"$VOL\" 2>/dev/null; then "
+        "        NBD=\"/dev/nbd$n\"; break; "
+        "      fi; "
+        "    done\n"
+        "    [ -n \"$NBD\" ] || { echo 'NBD_CONNECT_FAILED — all /dev/nbd* busy or qemu-nbd error'; exit 2; }\n"
+        "    # let kernel re-read partition table\n"
+        "    sleep 1\n"
+        "    BLK=\"$NBD\"\n"
+        "    ;;\n"
+        "  *)\n"
+        "    echo \"UNSUPPORTED_STORAGE_TYPE: $STYPE\"; exit 2\n"
+        "    ;;\n"
+        "esac\n"
+        # NS Apr 2026 — losetup -b 512 -fP wraps the resolved block device with
+        # forced 512b logical sectors + partscan. This works whether $BLK is an LV,
+        # a /dev/zvol, /dev/rbdN, or /dev/nbdN. Forces partition layout consistency
+        # for guests authored on 512b but living on 4K LUN/zvol/RBD blocks.
+        "LOOP=$(losetup -b 512 -fP --show \"$BLK\" 2>&1)\n"
+        "[ -b \"$LOOP\" ] || { echo \"LOSETUP_FAILED:$LOOP\"; exit 4; }\n"
+        # Wait briefly for partition nodes to materialize
+        "for i in 1 2 3 4 5; do ls -1 ${LOOP}p* 2>/dev/null | head -1 >/dev/null && break; sleep 1; done\n"
+        # Find largest NTFS partition (Windows volume)
+        "WIN_PART=$(for p in ${LOOP}p*; do "
+        "[ -b \"$p\" ] || continue; "
+        "FT=$(blkid -s TYPE -o value \"$p\" 2>/dev/null); "
+        "[ \"$FT\" = ntfs ] || continue; "
+        "SZ=$(blockdev --getsize64 \"$p\" 2>/dev/null); "
+        "echo \"$SZ $p\"; "
+        "done | sort -rn | head -1 | awk '{print $2}')\n"
+        "[ -n \"$WIN_PART\" ] || { echo 'NO_NTFS_FOUND'; "
+        "echo 'partitions seen:'; ls -la ${LOOP}p* 2>/dev/null; "
+        "echo 'blkid output:'; for p in ${LOOP}p*; do blkid \"$p\" 2>/dev/null; done; "
+        "exit 5; }\n"
+        "echo \"WIN_PART=$WIN_PART\"\n"
+        # NS Apr 2026 — Windows guests almost always leave NTFS in "Fast Startup
+        # hibrid hibernated" state after a "clean" shutdown (Win10/11 default).
+        # ntfsfix clears the journal + dirty bit so ntfs-3g will RW-mount.
+        # Safe here: VM is offline, Windows recovers on next boot anyway.
+        "ntfsfix \"$WIN_PART\" >/tmp/ntfsfix.log 2>&1 || echo \"ntfsfix exit=$?\"\n"
+        "mount -t ntfs-3g -o rw,recover,remove_hiberfile \"$WIN_PART\" \"$WIN_MNT\" || "
+        "{ echo 'NTFS_MOUNT_FAILED'; cat /tmp/ntfsfix.log; exit 6; }\n"
+        # Sanity check that we actually got RW
+        "touch \"$WIN_MNT/.pegaprox-rw-test\" 2>/dev/null && rm -f \"$WIN_MNT/.pegaprox-rw-test\" || "
+        "{ echo 'NTFS_NOT_RW'; exit 6; }\n"
+        # Find Windows directory (case-sensitive on ntfs-3g)
+        "WDIR=\"\"; for d in Windows WINDOWS windows; do "
+        "[ -d \"$WIN_MNT/$d/System32/config\" ] && { WDIR=\"$d\"; break; }; "
+        "done\n"
+        "[ -n \"$WDIR\" ] || { echo 'NO_WINDOWS_DIR'; exit 7; }\n"
+        "echo \"WDIR=$WDIR\"\n"
+        # Detect version via SOFTWARE hive
+        "SOFTWARE=\"$WIN_MNT/$WDIR/System32/config/SOFTWARE\"\n"
+        "VER_NAME=$(hivexsh \"$SOFTWARE\" <<HEOF 2>/dev/null\n"
+        "cd \\\\Microsoft\\\\Windows NT\\\\CurrentVersion\n"
+        "lsval ProductName\n"
+        "HEOF\n"
+        ")\n"
+        "VER_BUILD=$(hivexsh \"$SOFTWARE\" <<HEOF 2>/dev/null\n"
+        "cd \\\\Microsoft\\\\Windows NT\\\\CurrentVersion\n"
+        "lsval CurrentBuildNumber\n"
+        "HEOF\n"
+        ")\n"
+        "echo \"VER_NAME=$VER_NAME\"\n"
+        "echo \"VER_BUILD=$VER_BUILD\"\n"
+        # Pick driver subdir — DEFAULTS, real mapping done Python-side and passed via env
+        "SUBDIR=\"${VIRTIO_SUBDIR:-w11/amd64}\"\n"
+        "echo \"SUBDIR=$SUBDIR\"\n"
+        # Copy SYS / INF / CAT for each driver
+        "DRV_DEST=\"$WIN_MNT/$WDIR/System32/drivers\"\n"
+        "INF_DEST=\"$WIN_MNT/$WDIR/INF\"\n"
+        "mkdir -p \"$INF_DEST\" 2>/dev/null||true\n"
+        "COPIED=0\n"
+        "for D in $DRIVERS; do "
+        "SRC=\"$ISO_MNT/$D/$SUBDIR\"; "
+        "[ -d \"$SRC\" ] || { echo \"SKIP $D (no $SRC)\"; continue; }; "
+        "if cp -f \"$SRC\"/*.sys \"$DRV_DEST/\" 2>/dev/null; then "
+        "  cp -f \"$SRC\"/*.inf \"$INF_DEST/\" 2>/dev/null||true; "
+        "  cp -f \"$SRC\"/*.cat \"$DRV_DEST/\" 2>/dev/null||true; "
+        "  COPIED=$((COPIED+1)); "
+        "  echo \"COPIED $D\"; "
+        "else "
+        "  echo \"COPY_FAILED $D (mount RO?)\"; "
+        "fi; "
+        "done\n"
+        "[ \"$COPIED\" -gt 0 ] || { echo 'NO_DRIVERS_COPIED'; exit 8; }\n"
+        # Inject SYSTEM-hive registry: CriticalDeviceDatabase + Services for storage drivers.
+        # We always target ControlSet001 (the most common; Windows fixes Select on next boot).
+        # NS Apr 2026 — using python3-hivex (well-supported on Debian/Proxmox) instead of
+        # hivexregedit which Debian's libhivex-bin doesn't ship.
+        "SYSTEM_HIVE=\"$WIN_MNT/$WDIR/System32/config/SYSTEM\"\n"
+        "python3 - \"$SYSTEM_HIVE\" << 'PYEOF' || { echo 'HIVEX_MERGE_FAILED'; exit 9; }\n"
+        "import sys, hivex\n"
+        "from hivex.hive_types import REG_DWORD, REG_SZ, REG_EXPAND_SZ\n"
+        "h = hivex.Hivex(sys.argv[1], write=True)\n"
+        "def navigate(parent, parts):\n"
+        "    n = parent\n"
+        "    for p in parts:\n"
+        "        ch = h.node_get_child(n, p)\n"
+        "        if ch is None:\n"
+        "            ch = h.node_add_child(n, p)\n"
+        "        n = ch\n"
+        "    return n\n"
+        "def set_dword(node, key, val):\n"
+        "    h.node_set_value(node, {'key': key, 't': REG_DWORD,\n"
+        "        'value': val.to_bytes(4, 'little')})\n"
+        "def set_sz(node, key, val):\n"
+        "    h.node_set_value(node, {'key': key, 't': REG_SZ,\n"
+        "        'value': (val + '\\u0000').encode('utf-16-le')})\n"
+        "def set_expand_sz(node, key, val):\n"
+        "    h.node_set_value(node, {'key': key, 't': REG_EXPAND_SZ,\n"
+        "        'value': (val + '\\u0000').encode('utf-16-le')})\n"
+        "root = h.root()\n"
+        "cs = navigate(root, ['ControlSet001'])\n"
+        "services = navigate(cs, ['Services'])\n"
+        "control = navigate(cs, ['Control'])\n"
+        "cdb = navigate(control, ['CriticalDeviceDatabase'])\n"
+        "for svc, tag, img in [('viostor', 0x58, 'system32\\\\drivers\\\\viostor.sys'),\n"
+        "                     ('vioscsi', 0x59, 'system32\\\\drivers\\\\vioscsi.sys')]:\n"
+        "    svc_node = navigate(services, [svc])\n"
+        "    set_expand_sz(svc_node, 'ImagePath', img)\n"
+        "    set_dword(svc_node, 'Type', 1)\n"
+        "    set_dword(svc_node, 'Start', 0)\n"
+        "    set_sz(svc_node, 'Group', 'SCSI miniport')\n"
+        "    set_dword(svc_node, 'ErrorControl', 1)\n"
+        "    set_dword(svc_node, 'Tag', tag)\n"
+        "    params = navigate(svc_node, ['Parameters'])\n"
+        "    set_dword(params, 'BusType', 1)\n"
+        "    pnp = navigate(params, ['PnpInterface'])\n"
+        "    set_dword(pnp, '5', 1)\n"
+        "GUID = '{4D36E97B-E325-11CE-BFC1-08002BE10318}'\n"
+        "for pci_id, svc in [('pci#ven_1af4&dev_1001', 'viostor'),\n"
+        "                    ('pci#ven_1af4&dev_1001&subsys_00021af4&rev_00', 'viostor'),\n"
+        "                    ('pci#ven_1af4&dev_1004', 'vioscsi'),\n"
+        "                    ('pci#ven_1af4&dev_1004&subsys_00081af4', 'vioscsi'),\n"
+        "                    ('pci#ven_1af4&dev_1041', 'vioscsi')]:\n"
+        "    cd = navigate(cdb, [pci_id])\n"
+        "    set_sz(cd, 'ClassGUID', GUID)\n"
+        "    set_sz(cd, 'Service', svc)\n"
+        "h.commit(None)\n"
+        "print('hivex commit OK')\n"
+        "PYEOF\n"
+        "echo 'INJECTION_OK'\n"
+    )
+
+    sf = f"/tmp/v2p-virtio-inject-{task.proxmox_vmid}.sh"
+    _pve_node_exec(pve_mgr, node,
+        f"cat > {sf} << 'EOFSCRIPT'\n{script}EOFSCRIPT\nchmod +x {sf}",
+        timeout=15)
+
+    # Detect version first via a separate quick run (so we can pass VIRTIO_SUBDIR cleanly)
+    # Simpler path: do a probe-only run then a real run. But to keep cost down we just
+    # let the script default w11/amd64 most of the time, and override via env if we know.
+    # In practice, virt-customize-style detection on Server 2025 needs the build number,
+    # so do a quick probe via hivexsh from pegaprox:
+    probe_cmd = (
+        f"hivexsh \"$(losetup -b 512 -fP --show {shlex.quote(vol_path)})\" 2>/dev/null; true"
+    )
+    # Skip the probe — we drive it from the script itself which already prints VER_BUILD.
+    # We do TWO runs: dry probe (just the mount + version detect lines), then the real run.
+    # But that doubles I/O; instead: pre-set a sane subdir per detection, fall back to w11.
+    # For now: pass detected hint from task.config.ostype if user set it explicitly.
+    ostype_hint = (getattr(task, 'ostype', '') or '').lower()
+    subdir_hint = ''
+    if 'win11' in ostype_hint or 'w11' in ostype_hint:
+        subdir_hint = 'w11/amd64'
+    elif 'win10' in ostype_hint or 'w10' in ostype_hint:
+        subdir_hint = 'w10/amd64'
+    elif '2k25' in ostype_hint or '2025' in ostype_hint:
+        subdir_hint = '2k25/amd64'
+    elif '2k22' in ostype_hint or '2022' in ostype_hint:
+        subdir_hint = '2k22/amd64'
+    elif '2k19' in ostype_hint or '2019' in ostype_hint:
+        subdir_hint = '2k19/amd64'
+
+    env_prefix = f"VIRTIO_SUBDIR={shlex.quote(subdir_hint)} " if subdir_hint else ""
+    rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"{env_prefix}bash {sf} 2>&1; rc=$?; rm -f {sf}; exit $rc",
+        timeout=300)
+    out_str = str(out or '')
+    # Surface the interesting lines — keep the log compact
+    for marker in ['WIN_PART=', 'WDIR=', 'VER_NAME=', 'VER_BUILD=', 'SUBDIR=', 'COPIED ', 'SKIP ', 'INJECTION_OK']:
+        for line in out_str.splitlines():
+            if marker in line:
+                task.log(f"[VirtIO] {line.strip()}")
+                break
+
+    if rc == 0 and 'INJECTION_OK' in out_str:
+        task.log("[VirtIO] ✓ Drivers staged + registry merged. Switch scsihw to virtio-scsi-pci to activate.")
+        return True
+    task.log(f"[VirtIO] ✗ Injection failed (rc={rc}). Last 400 chars of output:")
+    task.log(out_str[-400:])
+    return False
+
+
 # NS Apr 2026 — Snapshot-iterative ZERO-DOWNTIME V2P (transfer_mode='snapshot_zero').
 # VM stays running on ESXi the entire time except for ~5-15s final cutover.
 # Multi-disk capable. Algorithm:
@@ -1471,12 +1870,23 @@ def _register_uefi_fallback_loader(pve_mgr, task):
 #   take final snapshot, transfer last delta
 #   start VM on Proxmox, shut down ESXi VM, cleanup all snapshots
 def _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, cmd, timeout=30):
-    """Run a command on ESXi via sshpass+ssh from this PegaProx host. Returns (rc, stdout, stderr)."""
+    """Run a command on ESXi via sshpass+ssh from this PegaProx host. Returns (rc, stdout, stderr).
+
+    NS Apr 2026 — ControlMaster opt-in. V2P migrations issue dozens of SSH calls
+    to the same ESXi host (vim-cmd, ls, dd, rm). With ControlMaster the first
+    call opens the master, all follow-ups (within 300 s) skip TCP+SSH-handshake.
+    Major contributor to the AccountLockFailures we previously hit on ESXi.
+    """
     import subprocess, shlex as _sh
     full = ['sshpass', '-p', esxi_pass, 'ssh',
             '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
-            '-o', 'BatchMode=no', '-o', 'ConnectTimeout=10',
-            f'{esxi_user}@{esxi_host}', cmd]
+            '-o', 'BatchMode=no', '-o', 'ConnectTimeout=10']
+    try:
+        from pegaprox.utils.ssh_pool import controlmaster_args
+        full.extend(controlmaster_args(esxi_host, esxi_user))
+    except Exception:
+        pass  # graceful fallback
+    full.extend([f'{esxi_user}@{esxi_host}', cmd])
     try:
         r = subprocess.run(full, capture_output=True, timeout=timeout, text=True)
         return r.returncode, r.stdout, r.stderr
@@ -4119,6 +4529,9 @@ exit $((S + R))
                 _register_uefi_fallback_loader(pve_mgr, task)
             except Exception as _fe:
                 task.log(f"  EFI fallback loader skipped: {_fe}")
+            # VirtIO injection intentionally NOT called here — VM is live (sshfs_boot
+            # live-pivot path), offline NTFS edits would corrupt the running guest.
+            # Inject runs only on offline/auto/snapshot_zero paths where the VM is off.
         task.log(f"  Boot: order={disk_bus}0")
         task.log(f"  VM {task.proxmox_vmid} continues running - ZERO downtime ✓")
         
@@ -4290,6 +4703,8 @@ exit $((S + R))
             _register_uefi_fallback_loader(pve_mgr, task)
         except Exception as _e:
             task.log(f"EFI fallback registration skipped: {_e}")
+        # VirtIO injection skipped here on purpose — sshfs_boot post-pivot path,
+        # VM is already running. See helper docstring + guard.
 
         # Start VM on local storage
         if task.start_after or vm_running_on_ssh:

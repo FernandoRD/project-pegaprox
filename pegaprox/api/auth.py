@@ -709,6 +709,7 @@ def auth_login():
         'portal_only': user.get('portal_only', False),
         'default_theme': default_theme,  # NS: Include for frontend fallback
         'reverse_proxy_enabled': settings.get('reverse_proxy_enabled', False),
+        'air_gap_mode': settings.get('air_gap_mode', False),
         'requires_2fa_setup': requires_2fa_setup,  # NS: Feb 2026 - Force 2FA
         # NS: Security warning if using default password
         'security_warning': 'DEFAULT_PASSWORD' if (user['role'] == ROLE_ADMIN and password == 'admin') else None,
@@ -937,6 +938,7 @@ def auth_check():
         'password_expiry': password_expiry,
         'requires_2fa_setup': requires_2fa_setup,
         'reverse_proxy_enabled': settings.get('reverse_proxy_enabled', False),
+        'air_gap_mode': settings.get('air_gap_mode', False),
         'default_theme': default_theme
     })
 

@@ -1,14 +1,20 @@
 {
-    "version": "0.9.7.1",
-    "build": "2026.04.23",
-    "release_date": "2026-04-23",
+    "version": "0.9.8",
+    "build": "2026.04.25",
+    "release_date": "2026-04-25",
     "changelog": [
+        "ESXi → Proxmox migration: near-zero-downtime live mirror, multi-disk Windows support, 4K LUN compatibility",
+        "Optional VirtIO driver pre-staging for migrated Windows guests (works on LVM, ZFS, Ceph RBD and NFS targets)",
+        "Better ESXi connection reliability — periodic keepalive + auto-reconnect on stale sessions",
+        "Deeplinks to nodes, VMs and containers in the Proxmox UI (#341, thanks @gyptazy)",
         "Italian translation — thanks @fabriziosalmi (#332)",
-        "PBS Reports tab: executive summary, inventory, gap analysis + PDF/PNG export (#273)",
-        "Rolling update: optional --with-local-disks evacuation, HA-rerouted migrations no longer false-fail (#330, #340)",
-        "Scheduled actions: name and vm_type actually persist now (#337)",
-        "Site Recovery: OVS bridges + SDN vnets show up in the network mapping dropdown (#329)",
-        "misc: excluded-VMs button clipping, extra VNC keepalive on the RFB layer (#335, #312)"
+        "PBS Reports tab with executive summary, inventory and PDF/PNG export (#273)",
+        "Rolling update improvements + Site Recovery network mapping fixes (#329, #330, #337, #340)",
+        "OIDC Authentik fixes + skip-TLS-verify toggle for self-signed setups (#188)",
+        "Webhook alerts (Slack / Discord / Teams / ntfy / generic JSON)",
+        "Prometheus / OpenMetrics exporter at /api/metrics",
+        "WebAuthn / FIDO2 second-factor support",
+        "Login hardening + small UI polish (#312, #335)"
     ],
     "min_python": "3.8",
     "download_url": "https://github.com/PegaProx/project-pegaprox/releases/latest",
@@ -25,6 +31,7 @@
         "images/pegaprox.png",
         "images/sponsors/sponsor1.png",
         "images/sponsors/sponsor2.png",
+        "images/sponsors/idkmanager.png",
         "misc/proxmox-lxc-appliance-creator.sh",
         "pegaprox/__init__.py",
         "pegaprox/api/__init__.py",
@@ -188,14 +195,16 @@
         "plugins/status_page/status.html"
     ],
     "prev_changelog": [
+        "Italian translation — thanks @fabriziosalmi (#332)",
+        "PBS Reports tab: executive summary, inventory, gap analysis + PDF/PNG export (#273)",
+        "Rolling update: optional --with-local-disks evacuation, HA-rerouted migrations no longer false-fail (#330, #340)",
+        "Scheduled actions: name and vm_type actually persist now (#337)",
+        "Site Recovery: OVS bridges + SDN vnets show up in the network mapping dropdown (#329)",
         "SSH reachability: corosync-VLAN setups now resolve the real mgmt IP for all node ops (#324)",
         "Node Hardening: PDF/PNG export of CIS/Lynis/STIG/PegaProx audit reports",
         "KSM Sharing visible in Node Summary, always shown (matches native PVE UI)",
-        "CVE Scanner: failed-scan nodes no longer show as green '0 CVEs' — grey dash with failed count",
-        "CVE Scanner: breathing room in corporate layout (taller stat cards, bigger gap)",
         "Corporate dashboard: single-node clusters show 'Standalone' badge instead of 'Quorum verloren' (#326)",
-        "Disk Create modal: dropdown click no longer dismisses the modal (#323)",
-        "Translations: verbose audit, KSM sharing, snooze controls across DE/EN/FR/ES/PT/KO"
+        "Disk Create modal: dropdown click no longer dismisses the modal (#323)"
     ],
     "breaking_changes": []
 }

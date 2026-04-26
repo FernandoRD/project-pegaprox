@@ -454,6 +454,9 @@
                 acme_directory_url: '',
                 cert_info: null,
                 reverse_proxy_enabled: false,
+                // NS Apr 2026 — compliance / hardened-environment settings
+                audit_retention_days: 90,
+                air_gap_mode: false,
                 trusted_proxies: '',
                 proxy_bind_address: '',
                 logo_url: '',
@@ -1250,6 +1253,8 @@
                             cert_info: data.cert_info || null,
                             http_redirect_port: data.http_redirect_port || 0,
                             reverse_proxy_enabled: data.reverse_proxy_enabled || false,
+                            audit_retention_days: data.audit_retention_days || 90,
+                            air_gap_mode: data.air_gap_mode || false,
                             trusted_proxies: data.trusted_proxies || '',
                             proxy_bind_address: data.proxy_bind_address || '',
                             default_theme: data.default_theme || 'proxmoxDark',
@@ -1462,6 +1467,8 @@
                     formData.append('http_redirect_port', serverSettings.http_redirect_port || 0);
                     formData.append('ssl_enabled', serverSettings.ssl_enabled);
                     formData.append('reverse_proxy_enabled', serverSettings.reverse_proxy_enabled);
+                    formData.append('audit_retention_days', String(serverSettings.audit_retention_days || 90));
+                    formData.append('air_gap_mode', serverSettings.air_gap_mode ? 'true' : 'false');
                     formData.append('trusted_proxies', serverSettings.trusted_proxies || '');
                     formData.append('proxy_bind_address', serverSettings.proxy_bind_address || '');
                     formData.append('default_theme', serverSettings.default_theme || 'proxmoxDark');

@@ -77,17 +77,26 @@ def save_audit_log():
 
 
 def cleanup_audit_log():
-    """Remove audit entries older than retention period
-    
-    uses db.delete now
+    """Remove audit entries older than retention period.
+
+    NS Apr 2026 — retention is now admin-configurable via settings
+    (audit_retention_days). Falls back to AUDIT_RETENTION_DAYS constant
+    if setting isn't set yet (fresh install or pre-0.9.8).
     """
     global audit_log
-    
+
     try:
         db = get_db()
-        deleted = db.cleanup_audit_log(days=AUDIT_RETENTION_DAYS)
+        retention = AUDIT_RETENTION_DAYS
+        try:
+            v = db.get_server_setting('audit_retention_days', None)
+            if v is not None:
+                retention = max(30, min(3650, int(v)))
+        except Exception:
+            pass
+        deleted = db.cleanup_audit_log(days=retention)
         if deleted > 0:
-            logging.info(f"Cleaned up {deleted} old audit log entries")
+            logging.info(f"Cleaned up {deleted} old audit log entries (retention={retention}d)")
     except Exception as e:
         logging.error(f"Failed to cleanup audit log: {e}")
 

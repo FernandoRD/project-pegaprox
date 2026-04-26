@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.7.1--beta-blue" alt="Version"/>
+  <img src="https://img.shields.io/badge/version-0.9.8--beta-blue" alt="Version"/>
   <img src="https://img.shields.io/badge/python-3.8+-green" alt="Python"/>
   <img src="https://img.shields.io/badge/license-AGPL--3.0--License-orange" alt="License"/>
 </p>
@@ -57,7 +57,9 @@ PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng 
 ### 🥉 Bronze
 
 <p align="center">
-  <em>Your logo here</em> — <a href="mailto:sponsor@pegaprox.com">Become a Bronze Sponsor</a>
+  <a href="https://idkmanager.com/">
+    <img src="images/sponsors/idkmanager.png" alt="IDK Manager" width="120"/>
+  </a>
 </p>
 
 <p align="center">
@@ -129,8 +131,8 @@ PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng 
 ### Advanced Features
 - 🌐 **Offline Mode** - Works without internet (local assets)
 - 🎨 **Themes** - Dark mode, Proxmox theme, and more
-- 🏢 **Corporate Layout** - Tree-based sidebar with dense tables (experimental)
-- 🌍 **Multi-Language** - English, German, French, Spanish, Portuguese, Korean
+- 🏢 **Corporate Layout** - Tree-based sidebar with dense tables
+- 🌍 **Multi-Language** - English, German, French, Spanish, Portuguese, Korean, Italian
 - 📱 **Responsive** - Works on desktop and mobile
 - 📦 **PBS Integration** - Proxmox Backup Server management with backup verification
 

@@ -4,6 +4,8 @@
 import json
 import logging
 import base64
+import re
+import shlex
 from datetime import datetime
 from flask import Blueprint, jsonify, request
 
@@ -335,8 +337,11 @@ def setup_multipath(cluster_id):
                         _exec('cp /etc/multipath.conf /etc/multipath.conf.bak.$(date +%Y%m%d%H%M%S)')
 
                     # Write new multipath.conf via base64 for safe transfer
+                    # NS Apr 2026 — base64 output is [A-Za-z0-9+/=] only, so injection-safe.
+                    # Wrap in shlex.quote() anyway for consistency with the iSCSI fix and
+                    # so a future grep "_exec(f'" doesn't surface unwrapped sites.
                     conf_b64 = base64.b64encode(multipath_conf.encode()).decode()
-                    rc, out, err = _exec(f'echo {conf_b64} | base64 -d > /etc/multipath.conf')
+                    rc, out, err = _exec(f'echo {shlex.quote(conf_b64)} | base64 -d > /etc/multipath.conf')
                     node_result['steps'].append({
                         'action': 'config',
                         'success': rc == 0,
@@ -630,6 +635,44 @@ def discover_iscsi_targets(cluster_id, node):
         return jsonify({'error': safe_error(e, 'Failed to discover iSCSI targets')}), 500
 
 
+# NS Apr 2026 (F2 fix) — iSCSI parameters used to be interpolated into shell
+# commands via Python f-strings. With user-supplied target/portal/username/password
+# this was a post-auth RCE-as-root on the Proxmox node (CHAP password
+# "x; cat /etc/shadow #" → arbitrary command execution). Pentest finding F2.
+#
+# Two-layer fix:
+#   1. Strict regex validation rejects anything outside the expected character set
+#      BEFORE the values reach the shell. Fast-fails with a clear error.
+#   2. shlex.quote() wraps every interpolated value as defense-in-depth in case
+#      validation has a hole (e.g. unicode normalization tricks).
+#
+# Same pattern applied to the multipath conf-write at line ~339 (was base64-only,
+# but adding shlex.quote() keeps the code base consistent and audit-grep-friendly).
+_IQN_RE = re.compile(r'^(iqn\.\d{4}-\d{2}\.[a-z0-9.\-]+(?::[\x21-\x7e]{1,200})?|eui\.[0-9a-fA-F]{16}|naa\.[0-9a-fA-F]{16,32})$')
+_PORTAL_RE = re.compile(r'^(?:\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.\-]{1,253})(?::\d{1,5})?$')
+_CHAP_USER_RE = re.compile(r'^[a-zA-Z0-9._\-]{1,256}$')
+# CHAP password: printable ASCII minus the shell metacharacters that bite us.
+# RFC 7143 allows more, but we tighten — admins almost always use generated alphanum.
+_CHAP_PASS_RE = re.compile(r'^[a-zA-Z0-9._+\-=:/!@%^]{1,256}$')
+
+
+def _validate_iscsi_inputs(portal, target, username='', password=''):
+    """Reject malformed iSCSI parameters before they reach the shell.
+
+    Returns (ok: bool, error: str). Pair with shlex.quote() at the call site
+    for defense-in-depth.
+    """
+    if not _PORTAL_RE.match(portal or ''):
+        return False, 'Invalid iSCSI portal — expected host[:port], no shell metacharacters'
+    if not _IQN_RE.match(target or ''):
+        return False, 'Invalid iSCSI target — expected IQN/EUI/NAA format (e.g. iqn.YYYY-MM.org.example:storage.lun01)'
+    if username and not _CHAP_USER_RE.match(username):
+        return False, 'Invalid CHAP username — alphanumeric plus . _ - only, max 256 chars'
+    if password and not _CHAP_PASS_RE.match(password):
+        return False, 'Invalid CHAP password — printable ASCII without shell metacharacters; max 256 chars'
+    return True, ''
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/iscsi/login', methods=['POST'])
 @require_auth(perms=['storage.config'])
 def login_iscsi_target(cluster_id, node):
@@ -640,16 +683,30 @@ def login_iscsi_target(cluster_id, node):
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
-    
+
     data = request.json or {}
     portal = data.get('portal', '')
     target = data.get('target', '')
     username = data.get('username', '')
     password = data.get('password', '')
-    
+
     if not portal or not target:
         return jsonify({'error': 'Portal and target required'}), 400
-    
+
+    # F2 fix — fast-fail on shell-unsafe inputs before SSH'ing anywhere
+    ok_v, msg = _validate_iscsi_inputs(portal, target, username, password)
+    if not ok_v:
+        return jsonify({'error': msg}), 400
+
+    # F2 fix — defense-in-depth shell quoting at every interpolation site.
+    # shlex.quote wraps in single-quotes and escapes embedded single-quotes,
+    # so even if a future regex regression lets a metacharacter through, the
+    # shell still parses the value as a single token.
+    target_q = shlex.quote(target)
+    portal_q = shlex.quote(portal)
+    username_q = shlex.quote(username) if username else ''
+    password_q = shlex.quote(password) if password else ''
+
     ssh = None
     try:
         # Resolve node IP
@@ -669,18 +726,18 @@ def login_iscsi_target(cluster_id, node):
 
         # If CHAP credentials provided, set them first
         if username and password:
-            _exec(f'''iscsiadm -m node -T {target} -p {portal} --op update -n node.session.auth.authmethod -v CHAP && \
-                iscsiadm -m node -T {target} -p {portal} --op update -n node.session.auth.username -v {username} && \
-                iscsiadm -m node -T {target} -p {portal} --op update -n node.session.auth.password -v {password}''')
+            _exec(f'''iscsiadm -m node -T {target_q} -p {portal_q} --op update -n node.session.auth.authmethod -v CHAP && \
+                iscsiadm -m node -T {target_q} -p {portal_q} --op update -n node.session.auth.username -v {username_q} && \
+                iscsiadm -m node -T {target_q} -p {portal_q} --op update -n node.session.auth.password -v {password_q}''')
 
         # Discovery
-        _exec(f'iscsiadm -m discovery -t sendtargets -p {portal}')
+        _exec(f'iscsiadm -m discovery -t sendtargets -p {portal_q}')
 
         # Login
-        login_rc, login_out, login_err = _exec(f'iscsiadm -m node -T {target} -p {portal} --login')
+        login_rc, login_out, login_err = _exec(f'iscsiadm -m node -T {target_q} -p {portal_q} --login')
 
         # Make persistent
-        _exec(f'iscsiadm -m node -T {target} -p {portal} --op update -n node.startup -v automatic')
+        _exec(f'iscsiadm -m node -T {target_q} -p {portal_q} --op update -n node.startup -v automatic')
 
         # Trigger multipath rescan
         _exec('multipathd reconfigure 2>/dev/null || true')

@@ -1501,6 +1501,8 @@
         /* Kill all decorative effects */
         body[data-layout="corporate"] .gradient-mesh,
         body[data-layout="corporate"] .noise-overlay { display: none !important; }
+        /* User-toggle (#342): kill noise overlay in modern layout too if user opted out */
+        body[data-noise="off"] .noise-overlay { display: none !important; }
         body[data-layout="corporate"] .glow-orange { box-shadow: none !important; }
         body[data-layout="corporate"] .backdrop-blur-xl,
         body[data-layout="corporate"] .backdrop-blur-sm,
@@ -2105,6 +2107,12 @@
     </style>
 </head>
 <body class="dark notranslate">
+    <script>
+        // NS Apr 2026 (#342) — apply noise-off attribute as early as possible to
+        // avoid a brief flash of the overlay on page load. localStorage flag set
+        // by the toggle in user prefs.
+        try { if (localStorage.getItem('pegaprox-noise') === 'off') document.body.setAttribute('data-noise', 'off'); } catch(_) {}
+    </script>
     <div class="noise-overlay"></div>
     
     <!-- NS: Loading screen - shows immediately while Babel compiles -->

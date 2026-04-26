@@ -462,8 +462,13 @@ def get_datastores(cluster_id):
         
         shared_storages = {}
         local_storages = {}
-        
+
         # MK: Apr 2026 — per-node try/except so one offline storage doesn't block all (#292)
+        # NS Apr 2026 — also track per-node reachability for shared storages so the UI
+        # can honestly show "active on pve1, unreachable from pve2" instead of pretending
+        # one node's view is global truth. Per-node entries stored under `_per_node` —
+        # we keep the first reachable node's stats as the headline numbers (Proxmox'
+        # convention: shared storage stats are equal across nodes that mount it).
         for node in nodes:
             try:
                 node_storage_url = f"https://{host}:8006/api2/json/nodes/{node}/storage"
@@ -474,6 +479,7 @@ def get_datastores(cluster_id):
                         storage_name = storage.get('storage')
                         config = storage_configs.get(storage_name, {})
                         is_shared = config.get('shared', 0) == 1
+                        is_active_here = storage.get('active', 1) == 1 and storage.get('enabled', 1) == 1
 
                         storage_info = {
                             'storage': storage_name,
@@ -492,7 +498,23 @@ def get_datastores(cluster_id):
 
                         if is_shared:
                             if storage_name not in shared_storages:
-                                shared_storages[storage_name] = storage_info
+                                shared_storages[storage_name] = dict(storage_info)
+                                shared_storages[storage_name]['active_on'] = []
+                                shared_storages[storage_name]['inactive_on'] = []
+                            entry = shared_storages[storage_name]
+                            (entry['active_on'] if is_active_here else entry['inactive_on']).append(node)
+                            # Prefer reachable-node stats for the headline numbers
+                            if is_active_here and (entry.get('total') == 0 and storage.get('total', 0) > 0):
+                                entry.update({
+                                    'total': storage.get('total', 0),
+                                    'used': storage.get('used', 0),
+                                    'avail': storage.get('avail', 0),
+                                    'used_fraction': storage.get('used_fraction', 0),
+                                })
+                            # Aggregate active=1 if at least one node sees it active
+                            if is_active_here:
+                                entry['active'] = 1
+                                entry['enabled'] = 1
                         else:
                             if node not in local_storages:
                                 local_storages[node] = []
@@ -508,6 +530,7 @@ def get_datastores(cluster_id):
                     'content': cfg.get('content', ''), 'total': 0, 'used': 0, 'avail': 0,
                     'used_fraction': 0, 'active': 0, 'enabled': cfg.get('disable', 0) != 1,
                     'shared': True, 'path': cfg.get('path', ''), 'nodes': cfg.get('nodes', ''),
+                    'active_on': [], 'inactive_on': list(nodes),
                 }
         
         return jsonify({

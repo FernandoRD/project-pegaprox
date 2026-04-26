@@ -2804,6 +2804,35 @@
                                         </div>
                                     </div>
 
+                                    {/* NS Apr 2026 (#342) — disable modern-layout noise overlay */}
+                                    <div className="pt-4 border-t border-proxmox-border">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-3">
+                                                <Icons.Eye className="w-5 h-5 text-gray-400" />
+                                                <div>
+                                                    <p className="text-sm font-medium text-white">{t('disableNoiseOverlay') || 'Disable noise overlay'}</p>
+                                                    <p className="text-xs text-gray-500">{t('disableNoiseOverlayDesc') || 'Removes the subtle dithering texture on the modern layout'}</p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={() => {
+                                                    const off = localStorage.getItem('pegaprox-noise') !== 'off';
+                                                    localStorage.setItem('pegaprox-noise', off ? 'off' : 'on');
+                                                    if (off) document.body.setAttribute('data-noise', 'off');
+                                                    else document.body.removeAttribute('data-noise');
+                                                    addToast(t('settingsSaved') || 'Saved', 'success');
+                                                }}
+                                                className={`relative w-12 h-6 rounded-full transition-colors ${
+                                                    localStorage.getItem('pegaprox-noise') === 'off' ? 'bg-emerald-500' : 'bg-proxmox-dark border border-proxmox-border'
+                                                }`}
+                                            >
+                                                <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                                                    localStorage.getItem('pegaprox-noise') === 'off' ? 'left-7' : 'left-1'
+                                                }`} />
+                                            </button>
+                                        </div>
+                                    </div>
+
                                     {/* LW Apr 2026 (#299) — default nodes collapsed in cluster overview */}
                                     <div className="pt-4 border-t border-proxmox-border">
                                         <div className="flex items-center justify-between">

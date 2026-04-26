@@ -12584,6 +12584,11 @@ echo DONE""",
         },
         'pam_faillock': {
             'check': """[ -f /etc/security/faillock.conf.d/cis-faillock.conf ] && echo OK || echo FAIL""",
+            # NS Apr 2026 — service-user-aware. Locking out the PegaProx service account
+            # would lock PegaProx out of the node it manages, so we ALWAYS exempt
+            # `root` and `pegaprox` (hardcoded). Operator may add more accounts via
+            # the optional service_user param (comma-separated).
+            'apply_template': True,
             'apply': """mkdir -p /etc/security/faillock.conf.d
 cat > /etc/security/faillock.conf.d/cis-faillock.conf << 'FLEOF'
 # CIS 5.3.3.1: Account lockout - 5 attempts, 10 min unlock
@@ -12593,7 +12598,25 @@ fail_interval = 900
 even_deny_root = false
 dir = /var/run/faillock
 FLEOF
+# pegaprox managed: hardcoded `root pegaprox` always exempt + optional extra accounts.
+# pam_faillock has no native exempt-list, but `pam_succeed_if user in <list>`
+# placed before the faillock module skips it for matching users.
+EXTRA_USERS="{service_user}"
+USER_LIST="root pegaprox"
+[ -n "$EXTRA_USERS" ] && USER_LIST="$USER_LIST $(echo "$EXTRA_USERS" | tr ',' ' ')"
+# Insert pam_succeed_if line in common-auth + common-account before pam_faillock
+# (idempotent — re-applies overwrite the line, marker-checked)
+for f in /etc/pam.d/common-auth /etc/pam.d/common-account; do
+  [ -f "$f" ] || continue
+  # remove old pegaprox line if any (idempotent re-apply with new user-list)
+  sed -i '/# pegaprox: service-user faillock exempt/d' "$f"
+  cp "$f" "${{f}}.bak.cis-svcexempt" 2>/dev/null || true
+  LINE='auth     [success=1 default=ignore]  pam_succeed_if.so user in '"$USER_LIST"'  # pegaprox: service-user faillock exempt'
+  [ "$f" = /etc/pam.d/common-account ] && LINE=$(echo "$LINE" | sed 's/^auth/account/')
+  sed -i "1i $LINE" "$f"
+done
 echo DONE""",
+            'defaults': {'service_user': ''},
         },
         'pw_history': {
             'check': """grep -q 'pam_pwhistory.so' /etc/pam.d/common-password 2>/dev/null && echo OK || echo FAIL""",
@@ -12690,13 +12713,23 @@ echo DONE""",
         },
         'pw_aging': {
             'check': """grep -q '^PASS_MAX_DAYS.*365' /etc/login.defs 2>/dev/null && echo OK || echo FAIL""",
+            # NS Apr 2026 — `root` and `pegaprox` are ALWAYS exempted (hardcoded).
+            # Optional service_user param adds more comma-separated accounts.
+            'apply_template': True,
             'apply': """sed -i 's/^PASS_MAX_DAYS.*/PASS_MAX_DAYS   365/' /etc/login.defs
 sed -i 's/^PASS_MIN_DAYS.*/PASS_MIN_DAYS   1/' /etc/login.defs
 sed -i 's/^PASS_WARN_AGE.*/PASS_WARN_AGE   30/' /etc/login.defs
-# exclude root from password aging - lockout prevention
-chage -M -1 root 2>/dev/null
-chage -m 0 root 2>/dev/null
+# Hardcoded exemptions: root + pegaprox (PegaProx service account)
+for u in root pegaprox $(echo "{service_user}" | tr ',' ' '); do
+  [ -z "$u" ] && continue
+  if id "$u" >/dev/null 2>&1; then
+    chage -M -1 "$u" 2>/dev/null
+    chage -m 0 "$u" 2>/dev/null
+    echo "  exempted: $u"
+  fi
+done
 echo DONE""",
+            'defaults': {'service_user': ''},
         },
         'default_umask': {
             'check': """(grep -q 'UMASK.*027' /etc/login.defs 2>/dev/null || grep -q 'umask 027' /etc/profile 2>/dev/null) && echo OK || echo FAIL""",
@@ -12789,27 +12822,58 @@ echo DONE""",
         # ---- STIG (DoD) controls - NS Mar 2026 ----
         'session_limit': {
             'check': """grep -q 'maxlogins' /etc/security/limits.conf 2>/dev/null && echo OK || echo FAIL""",
+            # NS Apr 2026 — `root` and `pegaprox` always unlimited (hardcoded).
+            # PegaProx parallel-SSH (Phase 1) easily uses 8+ concurrent sessions
+            # per cluster op; 10-session cap would intermittently fail.
+            'apply_template': True,
             'apply': """sed -i '/maxlogins/d' /etc/security/limits.conf 2>/dev/null
 cat >> /etc/security/limits.conf << 'SLEOF'
 
 # STIG UBTU-24-200000: Limit concurrent sessions
 * hard maxlogins 10
-# Root excluded - needs unlimited for system operations
+# Always exempted - system + PegaProx service account
 root hard maxlogins -1
+pegaprox hard maxlogins -1
 SLEOF
+# Optional extra service accounts
+for u in $(echo "{service_user}" | tr ',' ' '); do
+  [ -z "$u" ] && continue
+  if id "$u" >/dev/null 2>&1; then
+    echo "$u hard maxlogins -1" >> /etc/security/limits.conf
+    echo "  exempted: $u"
+  fi
+done
 echo DONE""",
+            'defaults': {'service_user': ''},
         },
         'inactive_accounts': {
             'check': """command -v useradd >/dev/null 2>&1 && \
 useradd -D 2>/dev/null | grep -q 'INACTIVE=35' && echo OK || echo FAIL""",
+            # NS Apr 2026 — `root` and `pegaprox` ALWAYS exempted (hardcoded).
+            # Whether SSH-only logins count toward `lastlog` varies by Linux flavour;
+            # better to be defensive and not auto-disable PegaProx's own access.
+            'apply_template': True,
             'apply': """useradd -D -f 35
-# exclude root - never auto-disable
-chage -I -1 root 2>/dev/null
-# apply to regular users only
+# Hardcoded exemptions
+SKIP_LIST="root|pegaprox"
+for u in root pegaprox; do
+  id "$u" >/dev/null 2>&1 && chage -I -1 "$u" 2>/dev/null
+done
+# Optional extra accounts
+for u in $(echo "{service_user}" | tr ',' ' '); do
+  [ -z "$u" ] && continue
+  if id "$u" >/dev/null 2>&1; then
+    chage -I -1 "$u" 2>/dev/null && echo "  exempted: $u"
+    SKIP_LIST="$SKIP_LIST|$u"
+  fi
+done
+# Apply to regular users only — skip service accounts
 for user in $(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd); do
+  echo "$user" | grep -qwE "^($SKIP_LIST)$" && continue
   chage -I 35 "$user" 2>/dev/null
 done
 echo DONE""",
+            'defaults': {'service_user': ''},
         },
         'remove_legacy_svcs': {
             'check': """dpkg -l telnet rsh-server rsh-client talk ntalk nis 2>/dev/null | grep -q '^ii' && echo FAIL || echo OK""",
@@ -13046,64 +13110,255 @@ echo DONE""",
         # safe to run repeatedly.
         'pve_fail2ban': {
             'check': """systemctl is-active fail2ban 2>/dev/null | grep -q active && [ -f /etc/fail2ban/jail.d/pegaprox-pve.conf ] && echo OK || echo FAIL""",
-            'verbose_check': """systemctl is-active fail2ban 2>/dev/null || echo 'service inactive' ; echo '---jails---' ; fail2ban-client status 2>/dev/null | grep 'Jail list' || echo 'no jails' ; echo '---banned (summary)---' ; for j in $(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/ {print $2}' | tr ',' ' ') ; do n=$(fail2ban-client status $j 2>/dev/null | awk '/Currently banned/ {print $NF}') ; echo "$j: ${n:-0} banned" ; done""",
+            'verbose_check': """echo '---host---' ; echo "Debian: $(cat /etc/debian_version 2>/dev/null)" ; pveversion 2>/dev/null | head -1 ; echo '---fail2ban---' ; systemctl is-active fail2ban 2>/dev/null || echo 'service inactive' ; fail2ban-client --version 2>/dev/null | head -1 ; echo '---banaction in our jail---' ; grep -E '^banaction' /etc/fail2ban/jail.d/pegaprox-pve.conf 2>/dev/null || echo '  (no pegaprox-pve.conf)' ; echo '---jails---' ; fail2ban-client status 2>/dev/null | grep 'Jail list' || echo 'no jails' ; echo '---banned (summary)---' ; for j in $(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/ {print $2}' | tr ',' ' ') ; do n=$(fail2ban-client status $j 2>/dev/null | awk '/Currently banned/ {print $NF}') ; echo "$j: ${n:-0} banned" ; done""",
+            # NS Apr 2026 — works on both PVE 8 (Debian 12 / fail2ban 0.11) and
+            # PVE 9 (Debian 13 / fail2ban 1.0+). Key decisions:
+            #   1. systemd backend everywhere — neither PVE 8 nor PVE 9 ships
+            #      /var/log/daemon.log by default; both log pveproxy/pvedaemon
+            #      to journald. Old config pointing at the file silently failed.
+            #   2. banaction picked by Debian major: D12 -> iptables-multiport
+            #      (works alongside pve-firewall iptables-nft compat), D13+ ->
+            #      nftables-multiport (native nft, no legacy compat layer needed).
+            #   3. NO `update-alternatives --set iptables iptables-legacy` —
+            #      that breaks pve-firewall on D13 and is unnecessary on D12.
+            #   4. failregex covers pvedaemon AND pveproxy, login_failed AND
+            #      authentication failure variants seen across both versions.
             'apply': """set -e
-apt-get install -y fail2ban >/dev/null 2>&1 || { echo 'INSTALL FAILED'; exit 1; }
+echo '[fail2ban] apt-get update + install...'
+apt-get update -qq 2>&1 | tail -3 || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban python3-systemd >/dev/null 2>&1 || {
+  echo 'INSTALL FAILED'; apt-get install -y fail2ban 2>&1 | tail -10; exit 1; }
 
-# Filter for PVE daemon auth failures (covers both API and Web-UI logins)
+# Detect Debian major version for banaction selection.
+# /etc/debian_version on D12 = "12.x", D13 = "13.x" or "trixie/sid" during transition.
+DEB_VER=$(cut -d. -f1 /etc/debian_version 2>/dev/null)
+case "$DEB_VER" in
+  13|14|15) BANACTION=nftables-multiport ;;
+  *)        BANACTION=iptables-multiport ;;
+esac
+PVE_VER=$(pveversion 2>/dev/null | head -1 | awk -F/ '{print $2}' | cut -d. -f1)
+echo "[fail2ban] detected: Debian=$DEB_VER, Proxmox=${PVE_VER:-?}, banaction=$BANACTION"
+
+echo '[fail2ban] writing filter + jail config...'
 cat > /etc/fail2ban/filter.d/proxmox.conf << 'F2BFILTER'
-# pegaprox managed — matches pvedaemon authentication failures
-# sample: pvedaemon[12345]: authentication failure; rhost=1.2.3.4 user=root@pam msg=...
+# pegaprox managed — matches pvedaemon/pveproxy auth failures via journald.
+# Patterns observed on PVE 8 and PVE 9:
+#   pvedaemon[12345]: authentication failure; rhost=1.2.3.4 user=root@pam msg=...
+#   pveproxy[12345]: authentication failure; rhost=1.2.3.4 ...
+#   pvedaemon[12345]: <IP>: ... 401 ... - - login failed
 [Definition]
-failregex = pvedaemon\\[.*\\]: authentication failure; rhost=<HOST>
+failregex = ^.* (pvedaemon|pveproxy)\\[\\d+\\]: authentication failure; rhost=<HOST>.*$
+            ^.* pvedaemon\\[\\d+\\]: <HOST>: \\S+ - .* 401\\s+\\S+\\s+- - login failed.*$
 ignoreregex =
+journalmatch = _COMM=pvedaemon
+              + _COMM=pveproxy
 F2BFILTER
 
-# Jail: sshd (hardened defaults) + proxmox (PVE API/Web auth)
-cat > /etc/fail2ban/jail.d/pegaprox-pve.conf << 'F2BJAIL'
+cat > /etc/fail2ban/jail.d/pegaprox-pve.conf << F2BJAIL
 # pegaprox managed — do not hand-edit; re-apply the CIS control to update
+# Generated for: Debian $DEB_VER, Proxmox ${PVE_VER:-?}, banaction=$BANACTION
 [DEFAULT]
 bantime   = 86400
 findtime  = 600
 maxretry  = 5
-banaction = iptables-multiport
+banaction = $BANACTION
+backend   = systemd
 
 [sshd]
 enabled  = true
 port     = ssh
-logpath  = %(sshd_log)s
-backend  = %(sshd_backend)s
+backend  = systemd
 
 [proxmox]
 enabled  = true
 port     = https,http,8006
 filter   = proxmox
-logpath  = /var/log/daemon.log
+backend  = systemd
 maxretry = 5
 findtime = 600
 bantime  = 86400
 F2BJAIL
 
+echo '[fail2ban] enable + restart...'
 systemctl enable fail2ban >/dev/null 2>&1 || true
-systemctl restart fail2ban >/dev/null 2>&1 || { echo 'RESTART FAILED'; exit 1; }
+if ! systemctl restart fail2ban 2>/tmp/f2b.err; then
+  echo 'RESTART FAILED'; cat /tmp/f2b.err; journalctl -u fail2ban -n 30 --no-pager 2>/dev/null; exit 1
+fi
 
-# Give it a second to pick up jails before we verify
-sleep 2
-fail2ban-client ping >/dev/null 2>&1 || { echo 'PING FAILED'; exit 1; }
+# Give it a moment to load jails, then verify both jails are up
+sleep 3
+if ! fail2ban-client ping >/dev/null 2>&1; then
+  echo 'PING FAILED'; journalctl -u fail2ban -n 30 --no-pager 2>/dev/null; exit 1
+fi
+status=$(fail2ban-client status 2>&1)
+echo "$status" | grep -q 'sshd' || { echo "SSHD JAIL MISSING:"; echo "$status"; exit 1; }
+echo "$status" | grep -q 'proxmox' || { echo "PROXMOX JAIL MISSING:"; echo "$status"; exit 1; }
 echo DONE""",
         },
     }
 
-    def check_node_hardening(self, node_name, verbose=False):
+    # NS Apr 2026 — Hardening profiles. Tags which controls belong to which profile.
+    # cis-l1 = baseline (default, all 40 controls), cis-l2 = stricter, vs-nfd = BSI VS-NfD
+    # (Proxmox-safe subset + extra BSI-specific informational checks).
+    #
+    # IMPORTANT: vs-nfd intentionally EXCLUDES controls that risk breaking Proxmox:
+    #   - usb_storage (admins need USB)
+    #   - restrict_compilers (breaks package builds)
+    #   - remove_legacy_svcs (rpcbind/postfix needed for NFS / cron mail)
+    #   - disable_services (Proxmox-relevant services controlled by user)
+    #   - audit_immutable (requires reboot, surprises users)
+    # SSH crypto + kernel modules are in vs-nfd but operator must opt in per-control via
+    # the existing apply UI — not auto-applied.
+    _HARDENING_PROFILES = {
+        'cis-l1': None,  # None = all CIS_CHECKS (default behaviour)
+        'cis-l2': None,  # alias for now — same surface as cis-l1, kept for future split
+        'vs-nfd': {
+            # Proxmox-safe subset of existing CIS controls
+            'fs_modules', 'core_dumps', 'mount_options', 'cron_hardening', 'journald',
+            'ssh_perms', 'ssh_crypto', 'pam_faillock', 'pw_history', 'shell_timeout',
+            'file_perms', 'pw_hash_rounds', 'pw_quality', 'pw_aging', 'default_umask',
+            'pkg_cleanup', 'debsums', 'login_banners', 'file_integrity', 'process_acct',
+            'sysstat', 'pam_tmpdir', 'session_limit', 'inactive_accounts',
+            'audit_boot', 'audit_rules', 'aide_audit_protect', 'mem_protection',
+            'apparmor', 'sysctl_hardening', 'auditd_service',
+            # Plus VS-NfD extras (defined below in _VSNFD_EXTRA_CHECKS)
+            'vsnfd_disk_encryption', 'vsnfd_audit_retention', 'vsnfd_journald_size',
+            'vsnfd_secure_boot', 'vsnfd_kernel_lockdown', 'vsnfd_password_min_12',
+        },
+        # NS Apr 2026 — extra framework profiles (mirror what the Compliance Dashboard uses)
+        # so Harden PVE Node UI can filter by the same lens. Pragmatic mappings, NOT formal.
+        # Updated to be more complete — was previously too conservative (#review)
+        'bsi': {
+            # IT-Grundschutz ORP/SYS/CON Bausteine that map to OS-level technical controls
+            'fs_modules', 'core_dumps', 'mount_options', 'cron_hardening', 'journald',
+            'ssh_perms', 'ssh_crypto', 'pam_faillock', 'pw_history', 'pw_quality',
+            'pw_aging', 'pw_hash_rounds', 'file_perms', 'login_banners', 'file_integrity',
+            'process_acct', 'session_limit', 'inactive_accounts', 'shell_timeout',
+            'default_umask', 'pam_tmpdir', 'audit_boot', 'audit_rules', 'aide_audit_protect',
+            'mem_protection', 'apparmor', 'sysctl_hardening', 'auditd_service',
+        },
+        'iso': {
+            # ISO 27001:2022 Annex A — A.5 (org), A.8 (technical) — software-implementable subset
+            'ssh_perms', 'ssh_crypto', 'pam_faillock', 'pw_history', 'pw_quality',
+            'pw_aging', 'pw_hash_rounds', 'file_perms', 'login_banners', 'file_integrity',
+            'process_acct', 'audit_boot', 'audit_rules', 'aide_audit_protect',
+            'audit_immutable', 'session_limit', 'inactive_accounts', 'shell_timeout',
+            'core_dumps', 'mount_options', 'mem_protection', 'apparmor', 'journald',
+            'default_umask', 'cron_hardening', 'auditd_service', 'sysctl_hardening',
+        },
+        'nis2': {
+            # NIS2 Art. 21 + KRITIS technical/organisational measures — broader than I had
+            'ssh_perms', 'ssh_crypto', 'pam_faillock', 'pw_history', 'pw_quality',
+            'pw_aging', 'file_perms', 'login_banners', 'file_integrity', 'process_acct',
+            'audit_boot', 'audit_rules', 'aide_audit_protect', 'audit_immutable',
+            'session_limit', 'inactive_accounts', 'mem_protection', 'apparmor',
+            'sysctl_hardening', 'auditd_service', 'journald', 'mount_options',
+        },
+        'cmmc1': {
+            # CMMC Level 1 (FAR 52.204-21) — 17 basic safeguarding controls, software-side
+            'ssh_perms', 'pam_faillock', 'pw_history', 'pw_quality', 'pw_aging',
+            'file_perms', 'login_banners', 'debsums', 'file_integrity',
+            'audit_boot', 'audit_rules', 'sysctl_hardening', 'auditd_service',
+            'mem_protection', 'apparmor',
+        },
+        'cmmc2': {
+            'fs_modules', 'core_dumps', 'mount_options', 'journald', 'ssh_perms',
+            'ssh_crypto', 'pam_faillock', 'pw_history', 'pw_quality', 'pw_aging',
+            'pw_hash_rounds', 'file_perms', 'session_limit', 'inactive_accounts',
+            'shell_timeout', 'file_integrity', 'process_acct', 'audit_boot',
+            'audit_rules', 'aide_audit_protect', 'sysctl_hardening', 'mem_protection',
+            'apparmor', 'auditd_service', 'debsums', 'pkg_cleanup',
+        },
+        'nist53': {
+            'ssh_perms', 'ssh_crypto', 'pam_faillock', 'pw_history', 'pw_quality',
+            'pw_aging', 'pw_hash_rounds', 'file_perms', 'session_limit',
+            'inactive_accounts', 'file_integrity', 'process_acct', 'audit_boot',
+            'audit_rules', 'aide_audit_protect', 'sysctl_hardening', 'mem_protection',
+            'apparmor', 'auditd_service', 'debsums', 'journald', 'pkg_cleanup',
+            'login_banners', 'default_umask',
+        },
+        'stig': {
+            'fs_modules', 'core_dumps', 'ssh_perms', 'ssh_crypto', 'pam_faillock',
+            'pw_history', 'pw_quality', 'file_perms', 'login_banners', 'file_integrity',
+            'audit_boot', 'audit_rules', 'aide_audit_protect', 'audit_immutable',
+            'mem_protection', 'sysctl_hardening', 'auditd_service',
+        },
+    }
+
+    # NS Apr 2026 — VS-NfD specific informational checks. ALL audit-only — apply is a
+    # no-op that prints DONE so the existing apply API doesn't blow up. Operator must
+    # configure these manually after reading the evidence (BSI Grundschutz expects
+    # documented operator decision per environment).
+    _VSNFD_EXTRA_CHECKS = {
+        'vsnfd_disk_encryption': {
+            'check': """if lsblk -o NAME,FSTYPE,TYPE 2>/dev/null | grep -qE 'crypto_LUKS|zfs.*encrypt'; then echo OK; else echo FAIL; fi""",
+            'verbose_check': """echo '--- block devices ---'; lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT 2>/dev/null | head -20; echo '--- LUKS ---'; lsblk -o NAME,FSTYPE 2>/dev/null | grep -i luks || echo '  (no LUKS volumes found)'; echo '--- ZFS encryption ---'; zfs get encryption 2>/dev/null | grep -v 'off' | head -5 || echo '  (no encrypted ZFS datasets)'; """,
+            'apply': "echo 'INFORMATIONAL: configure disk encryption manually per BSI guidance'; echo DONE",
+        },
+        'vsnfd_audit_retention': {
+            'check': """RETENTION=$(grep -h '^MaxRetentionSec' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' '); if [ -n "$RETENTION" ]; then case "$RETENTION" in *month|*M) NUM=${RETENTION%[mM]*}; [ "$NUM" -ge 6 ] && echo OK || echo FAIL ;; *year|*Y) echo OK ;; *) echo FAIL ;; esac; else echo FAIL; fi""",
+            'verbose_check': """echo '--- journald retention configuration ---'; grep -h 'MaxRetentionSec\\|SystemMaxUse\\|Storage' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null || echo '  (no MaxRetentionSec configured)'; echo '--- current journal size ---'; journalctl --disk-usage 2>/dev/null""",
+            'apply': "echo 'INFORMATIONAL: set MaxRetentionSec=6month (or higher) in /etc/systemd/journald.conf manually'; echo DONE",
+        },
+        'vsnfd_journald_size': {
+            'check': """SIZE=$(grep -h '^SystemMaxUse' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' '); if [ -n "$SIZE" ]; then case "$SIZE" in *G|*g) NUM=${SIZE%[gG]*}; [ "$NUM" -ge 1 ] && echo OK || echo FAIL ;; *) echo FAIL ;; esac; else echo FAIL; fi""",
+            'verbose_check': """grep -h 'SystemMaxUse\\|RuntimeMaxUse' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null || echo '  (no SystemMaxUse configured, journald uses 10% of /var/log/journal partition default)'""",
+            'apply': "echo 'INFORMATIONAL: set SystemMaxUse=1G or larger in /etc/systemd/journald.conf manually'; echo DONE",
+        },
+        'vsnfd_secure_boot': {
+            'check': """if [ -d /sys/firmware/efi ]; then if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then echo OK; else echo FAIL; fi; else echo FAIL; fi""",
+            'verbose_check': """echo '--- EFI status ---'; [ -d /sys/firmware/efi ] && echo 'EFI: yes' || echo 'EFI: no (legacy BIOS)'; echo '--- Secure Boot ---'; mokutil --sb-state 2>/dev/null || echo '  (mokutil not available)'; echo '--- TPM ---'; ls /dev/tpm* 2>/dev/null || echo '  (no TPM device)' """,
+            'apply': "echo 'INFORMATIONAL: enable Secure Boot in firmware (UEFI) — host re-installation may be required'; echo DONE",
+        },
+        'vsnfd_kernel_lockdown': {
+            'check': """LD=$(cat /sys/kernel/security/lockdown 2>/dev/null | tr -d ' '); echo "$LD" | grep -qE '\\[integrity\\]|\\[confidentiality\\]' && echo OK || echo FAIL""",
+            'verbose_check': """echo '--- kernel lockdown ---'; cat /sys/kernel/security/lockdown 2>/dev/null || echo '  (lockdown not available — kernel built without CONFIG_SECURITY_LOCKDOWN_LSM)'""",
+            'apply': "echo 'INFORMATIONAL: kernel lockdown is set at boot via cmdline (lockdown=integrity) or by Secure Boot. Cannot toggle live.'; echo DONE",
+        },
+        'vsnfd_password_min_12': {
+            'check': """grep -h 'minlen\\s*=' /etc/security/pwquality.conf /etc/security/pwquality.conf.d/*.conf 2>/dev/null | grep -oE 'minlen\\s*=\\s*[0-9]+' | tail -1 | awk -F= '{print $2}' | awk '{if ($1+0 >= 12) print "OK"; else print "FAIL"}' """,
+            'verbose_check': """echo '--- pwquality configuration ---'; grep -h 'minlen\\|minclass\\|dcredit\\|ucredit\\|lcredit\\|ocredit' /etc/security/pwquality.conf /etc/security/pwquality.conf.d/*.conf 2>/dev/null || echo '  (no pwquality settings found — install libpam-pwquality)'""",
+            'apply': "echo 'INFORMATIONAL: BSI requires minlen=12+. Use pw_quality CIS control with custom params or edit /etc/security/pwquality.conf manually.'; echo DONE",
+        },
+    }
+
+    def _profile_control_set(self, profile):
+        """Return the set of control_ids active for a given profile.
+
+        None / unknown profile → all CIS_CHECKS (backwards-compatible).
+        vs-nfd → curated subset + BSI extras.
+        """
+        if not profile:
+            return None  # signal: all controls
+        members = self._HARDENING_PROFILES.get(profile)
+        if members is None:
+            return None
+        return set(members)
+
+    def _all_hardening_controls(self):
+        """Merged dict of CIS_CHECKS + VS-NfD extras (id → control)."""
+        merged = dict(self.CIS_CHECKS)
+        merged.update(self._VSNFD_EXTRA_CHECKS)
+        return merged
+
+    def check_node_hardening(self, node_name, verbose=False, profile=None):
         """Check CIS hardening status for a node via SSH.
 
         verbose=False (default): returns {control_id: bool}
         verbose=True: returns {control_id: {'status': bool, 'evidence': str, 'command': str}}
                       — used for audit reports (#322). Also runs the per-control 'verbose_check'
                       command if defined, otherwise falls back to the raw check output.
+        profile=None / 'cis-l1' / 'cis-l2': all CIS controls (default).
+        profile='vs-nfd': Proxmox-safe subset + BSI VS-NfD extras (NS Apr 2026).
         """
+        all_checks = self._all_hardening_controls()
+        members = self._profile_control_set(profile)
+        if members is not None:
+            checks = {cid: ctrl for cid, ctrl in all_checks.items() if cid in members}
+        else:
+            checks = self.CIS_CHECKS  # original behaviour
         parts = []
-        for cid, ctrl in self.CIS_CHECKS.items():
+        for cid, ctrl in checks.items():
             if verbose and ctrl.get('verbose_check'):
                 # verbose check: extra context command AFTER the OK/FAIL line
                 parts.append(
@@ -13128,7 +13383,7 @@ echo DONE""",
                     tag = line.strip('-')
                     if tag == 'END':
                         break
-                    if tag in self.CIS_CHECKS:
+                    if tag in checks:
                         current_id = tag
                 elif current_id:
                     results[current_id] = line.strip() == 'OK'
@@ -13143,11 +13398,11 @@ echo DONE""",
         status_line = None
 
         def _flush(cid):
-            if cid and cid in self.CIS_CHECKS:
+            if cid and cid in checks:
                 results[cid] = {
                     'status': (status_line or '').strip() == 'OK',
                     'evidence': '\n'.join(l for l in evidence_lines if l.strip())[:2000],
-                    'command': self.CIS_CHECKS[cid].get('check', ''),
+                    'command': checks[cid].get('check', ''),
                 }
 
         for line in raw.splitlines():
@@ -13163,7 +13418,7 @@ echo DONE""",
                     continue
                 # new control — flush previous
                 _flush(current_id)
-                current_id = tag if tag in self.CIS_CHECKS else None
+                current_id = tag if tag in checks else None
                 section = 'status'
                 status_line = None
                 evidence_lines = []
@@ -13179,24 +13434,38 @@ echo DONE""",
         return results
 
     def apply_node_hardening(self, node_name, controls, params=None):
-        """Apply selected CIS controls to a node. Returns per-control results."""
+        """Apply selected CIS controls to a node. Returns per-control results.
+
+        NS Apr 2026 — also accepts VS-NfD informational checks (apply is no-op).
+        """
         import re as _re
+        all_checks = self._all_hardening_controls()
         out = {}
         for ctrl_id in controls:
-            if ctrl_id not in self.CIS_CHECKS:
+            if ctrl_id not in all_checks:
                 out[ctrl_id] = {'success': False, 'error': 'unknown control'}
                 continue
-            check = self.CIS_CHECKS[ctrl_id]
+            check = all_checks[ctrl_id]
             cmd = check['apply']
             # MK: templated controls get user-supplied values merged with defaults
+            # NS Apr 2026 — extended validator to accept Linux usernames (comma-list)
+            # for the service_user param used by pam_faillock / pw_aging /
+            # session_limit / inactive_accounts. Old regex only allowed IPs which
+            # was fine for backup_dns but broke service-user templates.
             if check.get('apply_template'):
                 vals = dict(check.get('defaults', {}))
                 if params and ctrl_id in params:
-                    # sanitize - only allow IP-safe chars
                     for k, v in params[ctrl_id].items():
                         v = str(v).strip()
-                        if v and _re.match(r'^[\d\.:a-fA-F]+$', v):
+                        if not v:
+                            continue
+                        # IP/IPv6/MAC-style for backup_dns
+                        if _re.match(r'^[\d\.:a-fA-F]+$', v):
                             vals[k] = v
+                        # Linux username — single or comma-separated list, no shell metas
+                        elif _re.match(r'^[a-zA-Z][a-zA-Z0-9._\-]{0,31}(?:,[a-zA-Z][a-zA-Z0-9._\-]{0,31})*$', v):
+                            vals[k] = v
+                        # else: silently dropped (defaults remain)
                 cmd = cmd.format(**vals)
             result = self._ssh_node_output(node_name, cmd, timeout=60)
             if result is not None and 'DONE' in result:

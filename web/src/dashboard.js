@@ -2230,6 +2230,393 @@
             );
         }
 
+        // NS Apr 2026 — Compliance Dashboard (top-level read-only audit view).
+        // Aggregates per-cluster hardening scores, BSI/ISO/NIS2 mapping, audit activity.
+        // Available to ops/Compliance Officers without admin rights (admin.audit or
+        // node.maintenance permission required). Settings → Compliance stays as the
+        // admin-side config surface.
+        function ComplianceDashboardTab({ clusters, selectedCluster, authFetch, addToast, t, isCorporate, user }) {
+            const [profile, setProfile] = useState('cis-l1');
+            const [results, setResults] = useState({});  // {clusterId: {nodeName: {controls, score}}}
+            const [loadingCluster, setLoadingCluster] = useState(null);
+            const [auditCounts, setAuditCounts] = useState(null);
+            const [refreshTick, setRefreshTick] = useState(0);
+
+            // Fetch hardening data for one cluster (all nodes)
+            const fetchCluster = async (cluster) => {
+                if (!cluster) return;
+                setLoadingCluster(cluster.id);
+                try {
+                    const nodesRes = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes`);
+                    if (!nodesRes || !nodesRes.ok) return;
+                    const nodesData = await nodesRes.json();
+                    const nodes = (nodesData?.data || nodesData || []).map(n => n.node).filter(Boolean);
+                    const perNode = {};
+                    for (const n of nodes) {
+                        try {
+                            const r = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes/${n}/hardening?profile=${encodeURIComponent(profile)}`);
+                            if (!r || !r.ok) { perNode[n] = { error: r ? r.status : 'unreachable' }; continue; }
+                            const d = await r.json();
+                            const ctrls = d.controls || {};
+                            const total = Object.keys(ctrls).length;
+                            const passed = Object.values(ctrls).filter(v => v === true || v?.status === true).length;
+                            perNode[n] = { controls: ctrls, total, passed, score: total ? Math.round(passed * 100 / total) : 0 };
+                        } catch (e) {
+                            perNode[n] = { error: String(e) };
+                        }
+                    }
+                    setResults(prev => ({ ...prev, [cluster.id]: perNode }));
+                } finally {
+                    setLoadingCluster(null);
+                }
+            };
+
+            const fetchAuditCounts = async () => {
+                try {
+                    const r = await authFetch(`${API_URL}/audit?limit=200`);
+                    if (!r || !r.ok) return;
+                    const d = await r.json();
+                    const entries = d?.entries || d?.logs || d || [];
+                    // Count by action prefix for the trend card
+                    const buckets = { auth: 0, rbac: 0, vm: 0, settings: 0, other: 0 };
+                    entries.forEach(e => {
+                        const a = (e.action || '').toLowerCase();
+                        if (a.startsWith('auth') || a.startsWith('login')) buckets.auth++;
+                        else if (a.startsWith('rbac') || a.startsWith('user') || a.startsWith('role') || a.startsWith('group')) buckets.rbac++;
+                        else if (a.startsWith('vm') || a.startsWith('portal.vm') || a.startsWith('snapshot') || a.startsWith('migration')) buckets.vm++;
+                        else if (a.startsWith('settings') || a.startsWith('script')) buckets.settings++;
+                        else buckets.other++;
+                    });
+                    setAuditCounts({ total: entries.length, ...buckets });
+                } catch (_) {}
+            };
+
+            // NS Apr 2026 — scoped to the currently selected cluster only.
+            // User explicitly asked: "show only the selected cluster" — avoids fanout
+            // SSH probes across every connected cluster on every tab open.
+            useEffect(() => {
+                if (selectedCluster?.id) fetchCluster(selectedCluster);
+                fetchAuditCounts();
+            }, [refreshTick, profile, selectedCluster?.id]);
+
+            const totalClusters = selectedCluster ? 1 : 0;
+            // Aggregate only over the selected cluster's nodes
+            const scopedResults = selectedCluster?.id ? { [selectedCluster.id]: results[selectedCluster.id] || {} } : {};
+            const overallScore = (() => {
+                const all = [];
+                Object.values(scopedResults).forEach(perNode => {
+                    Object.values(perNode).forEach(n => { if (typeof n.score === 'number') all.push(n.score); });
+                });
+                if (!all.length) return null;
+                return Math.round(all.reduce((a, b) => a + b, 0) / all.length);
+            })();
+
+            const scoreColor = (s) => s == null ? 'text-gray-500' : s >= 90 ? 'text-emerald-400' : s >= 70 ? 'text-yellow-400' : 'text-red-400';
+
+            // Framework mapping — static rollup based on which CIS controls cover which
+            // framework requirements. Pragmatic mapping, NOT a formal certification.
+            // EU side: BSI / ISO / NIS2 / VS-NfD.
+            // US side: CMMC L1 (FAR 52.204-21), CMMC L2 (NIST 800-171), NIST 800-53,
+            // DISA STIG, FIPS 140-3 (informational only, no real check yet).
+            // Mappings mirror backend _HARDENING_PROFILES — keep in sync. Pragmatic
+            // (gap-analysis), NOT a formal certification. Disclaimer in PDF report.
+            const frameworks = [
+                { id: 'bsi', name: 'BSI IT-Grundschutz', region: 'EU', controls: ['fs_modules','core_dumps','mount_options','cron_hardening','journald','ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','login_banners','file_integrity','process_acct','session_limit','inactive_accounts','shell_timeout','default_umask','pam_tmpdir','audit_boot','audit_rules','aide_audit_protect','mem_protection','apparmor','sysctl_hardening','auditd_service'] },
+                { id: 'iso', name: 'ISO 27001 (Annex A)', region: 'EU', controls: ['ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','login_banners','file_integrity','process_acct','audit_boot','audit_rules','aide_audit_protect','audit_immutable','session_limit','inactive_accounts','shell_timeout','core_dumps','mount_options','mem_protection','apparmor','journald','default_umask','cron_hardening','auditd_service','sysctl_hardening'] },
+                { id: 'nis2', name: 'NIS2 / KRITIS', region: 'EU', controls: ['ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','file_perms','login_banners','file_integrity','process_acct','audit_boot','audit_rules','aide_audit_protect','audit_immutable','session_limit','inactive_accounts','mem_protection','apparmor','sysctl_hardening','auditd_service','journald','mount_options'] },
+                { id: 'vsnfd', name: 'VS-NfD (BSI)', region: 'EU', controls: ['vsnfd_disk_encryption','vsnfd_audit_retention','vsnfd_journald_size','vsnfd_secure_boot','vsnfd_kernel_lockdown','vsnfd_password_min_12'] },
+                { id: 'cmmc1', name: 'CMMC L1 (FAR 52.204-21)', region: 'US', controls: ['ssh_perms','pam_faillock','pw_history','pw_quality','pw_aging','file_perms','login_banners','debsums','file_integrity','audit_boot','audit_rules','sysctl_hardening','auditd_service','mem_protection','apparmor'] },
+                { id: 'cmmc2', name: 'CMMC L2 / NIST 800-171', region: 'US', controls: ['fs_modules','core_dumps','mount_options','journald','ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','session_limit','inactive_accounts','shell_timeout','file_integrity','process_acct','audit_boot','audit_rules','aide_audit_protect','sysctl_hardening','mem_protection','apparmor','auditd_service','debsums','pkg_cleanup'] },
+                { id: 'nist53', name: 'NIST 800-53 (Mod)', region: 'US', controls: ['ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','pw_aging','pw_hash_rounds','file_perms','session_limit','inactive_accounts','file_integrity','process_acct','audit_boot','audit_rules','aide_audit_protect','sysctl_hardening','mem_protection','apparmor','auditd_service','debsums','journald','pkg_cleanup','login_banners','default_umask'] },
+                { id: 'stig', name: 'DISA STIG', region: 'US', controls: ['fs_modules','core_dumps','ssh_perms','ssh_crypto','pam_faillock','pw_history','pw_quality','file_perms','login_banners','file_integrity','audit_boot','audit_rules','aide_audit_protect','audit_immutable','mem_protection','sysctl_hardening','auditd_service'] },
+                // FIPS 140-3 is a CRYPTOGRAPHIC MODULE certification of the OpenSSL/libcrypto
+                // build itself. Stock Debian/Proxmox does NOT ship FIPS-validated OpenSSL.
+                // Listed for transparency — score will always be low. Marked informational.
+                { id: 'fips', name: 'FIPS 140-3', region: 'US', controls: ['vsnfd_kernel_lockdown'], informational: true, note: 'Requires FIPS-validated crypto module (RHEL/Ubuntu Pro). Not satisfiable on stock Proxmox.' },
+            ];
+            const frameworkScore = (fw) => {
+                let total = 0, passed = 0;
+                Object.values(scopedResults).forEach(perNode => {
+                    Object.values(perNode).forEach(n => {
+                        if (!n.controls) return;
+                        fw.controls.forEach(cid => {
+                            if (cid in n.controls) {
+                                total++;
+                                if (n.controls[cid] === true || n.controls[cid]?.status === true) passed++;
+                            }
+                        });
+                    });
+                });
+                return { total, passed, score: total ? Math.round(passed * 100 / total) : null };
+            };
+
+            // NS Apr 2026 — per-framework PDF download. Pragmatic mapping (not a formal
+            // certification report — disclaimer always at the top of the PDF). User asked
+            // for "die wichtigsten US Defense Dinger" ready-to-download.
+            const downloadFrameworkReport = (fw) => {
+                if (typeof window.jspdf === 'undefined' || typeof generatePegaProxPDF !== 'function') {
+                    addToast('PDF library not loaded', 'error');
+                    return;
+                }
+                const c = selectedCluster;
+                const score = frameworkScore(fw);
+                const blocks = [];
+                blocks.push({
+                    type: 'table', title: `${fw.name} — Compliance Coverage`,
+                    columns: ['Property', 'Value'],
+                    rows: [
+                        ['Framework', fw.name],
+                        ['Region', fw.region],
+                        ['Cluster', c?.name || c?.id || '—'],
+                        ['Profile', profile === 'vs-nfd' ? 'VS-NfD' : profile.toUpperCase()],
+                        ['Coverage score', score.score == null ? 'no data' : `${score.score}%`],
+                        ['Controls evaluated', `${score.passed}/${score.total}`],
+                        ['Generated at', new Date().toISOString()],
+                        ['Tool', 'PegaProx ' + (window.PEGAPROX_VERSION || '0.9.x')],
+                    ]
+                });
+                blocks.push({ type: 'spacer', height: 4 });
+                blocks.push({
+                    type: 'table', title: 'Disclaimer',
+                    columns: ['Note'],
+                    rows: [
+                        ['This report is a best-effort coverage analysis from automated CIS-style audit checks.'],
+                        ['It is NOT a formal certification, accreditation, or attestation against ' + fw.name + '.'],
+                        ['Formal compliance requires documented evidence per control, third-party audit, and (where applicable) certified cryptographic modules / Common Criteria evaluation.'],
+                        ['Use as gap-analysis input — not as an audit deliverable on its own.'],
+                    ]
+                });
+                blocks.push({ type: 'spacer', height: 4 });
+                // per-node + per-control matrix
+                const perNode = (results[c?.id] || {});
+                const allTitles = {
+                    fs_modules: 'Disable unused kernel modules',
+                    core_dumps: 'Disable core dumps',
+                    mount_options: '/dev/shm noexec mount options',
+                    journald: 'journald persistent + compressed',
+                    ssh_perms: 'SSH file permissions + config',
+                    ssh_crypto: 'SSH ciphers + MACs (BSI/CIS)',
+                    pam_faillock: 'PAM faillock (lockout policy)',
+                    pw_history: 'Password reuse history',
+                    pw_quality: 'Password complexity (pwquality)',
+                    pw_aging: 'Password aging policy',
+                    pw_hash_rounds: 'Password hash rounds (yescrypt)',
+                    file_perms: 'Critical file permissions',
+                    login_banners: 'Login banners (issue.net)',
+                    file_integrity: 'AIDE file integrity DB',
+                    audit_boot: 'auditd boot enabled',
+                    audit_rules: 'auditd rules loaded',
+                    aide_audit_protect: 'AIDE protects /var/log/audit',
+                    audit_immutable: 'auditd immutable mode',
+                    mem_protection: 'Memory protection (NX/ASLR)',
+                    apparmor: 'AppArmor enabled + enforced',
+                    sysctl_hardening: 'sysctl network hardening',
+                    auditd_service: 'auditd service enabled',
+                    process_acct: 'Process accounting (psacct)',
+                    debsums: 'debsums package integrity',
+                    pkg_cleanup: 'Unused packages removed',
+                    session_limit: 'TMOUT session limits',
+                    inactive_accounts: 'Inactive account expiry',
+                    default_umask: 'Default umask 027',
+                    shell_timeout: 'Shell timeout',
+                    vsnfd_disk_encryption: 'Disk encryption (LUKS / ZFS native)',
+                    vsnfd_audit_retention: 'journald MaxRetentionSec ≥ 6 months',
+                    vsnfd_journald_size: 'journald SystemMaxUse ≥ 1G',
+                    vsnfd_secure_boot: 'Secure Boot status',
+                    vsnfd_kernel_lockdown: 'Kernel lockdown (integrity/confidentiality)',
+                    vsnfd_password_min_12: 'Password minlen ≥ 12 (BSI)',
+                };
+                const matrixRows = [];
+                fw.controls.forEach(cid => {
+                    Object.entries(perNode).forEach(([nodeName, info]) => {
+                        if (!info.controls) return;
+                        const v = info.controls[cid];
+                        if (v === undefined) return;
+                        const status = (v === true || v?.status === true) ? 'PASS' : 'FAIL';
+                        matrixRows.push([nodeName, cid, allTitles[cid] || cid, status]);
+                    });
+                });
+                if (matrixRows.length) {
+                    blocks.push({
+                        type: 'table', title: 'Per-control results',
+                        columns: ['Node', 'Control ID', 'Title', 'Status'],
+                        rows: matrixRows,
+                    });
+                } else {
+                    blocks.push({
+                        type: 'table', title: 'Per-control results',
+                        columns: ['Note'],
+                        rows: [['No hardening data available — make sure SSH to nodes works and the selected profile covers this framework.']],
+                    });
+                }
+                const dt = new Date().toISOString().slice(0, 10);
+                generatePegaProxPDF({
+                    title: `${fw.name} Compliance Report`,
+                    subtitle: c?.name || 'PegaProx',
+                    clusterName: c?.name,
+                    filename: `pegaprox-compliance-${fw.id}-${(c?.id || 'cluster')}-${dt}.pdf`,
+                    content: blocks,
+                });
+            };
+
+            return (
+                <div className={isCorporate ? 'p-4 space-y-4' : 'space-y-6'}>
+                    {/* Header */}
+                    <div className="flex items-center justify-between flex-wrap gap-3">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.Lock className="w-5 h-5 text-emerald-400" />
+                                {t('complianceDashboard') || 'Compliance Dashboard'}
+                            </h2>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {t('complianceDashboardHint') || 'Read-only audit view across all clusters. Admin actions live under Settings → Compliance.'}
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <select
+                                value={profile}
+                                onChange={e => setProfile(e.target.value)}
+                                className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm">
+                                <option value="cis-l1">CIS Level 1 (default)</option>
+                                <option value="cis-l2">CIS Level 2</option>
+                                <option value="vs-nfd">VS-NfD (BSI Grundschutz)</option>
+                            </select>
+                            <button
+                                onClick={() => setRefreshTick(t => t + 1)}
+                                className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm hover:bg-proxmox-hover">
+                                {t('refresh') || 'Refresh'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Overall score */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                            <p className="text-xs text-gray-500 mb-1">{t('overallScore') || 'Overall score'}</p>
+                            <p className={`text-3xl font-bold ${scoreColor(overallScore)}`}>{overallScore == null ? '—' : `${overallScore}%`}</p>
+                            <p className="text-xs text-gray-500 mt-1 truncate">
+                                {selectedCluster ? (selectedCluster.name || selectedCluster.id) : (t('noClusterSelected') || 'No cluster selected')}
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Framework cards — split by region. Each has a Download Report button. */}
+                    {[
+                        { region: 'EU', label: t('regionEU') || 'EU / DACH frameworks' },
+                        { region: 'US', label: t('regionUS') || 'US Defense / Federal frameworks' },
+                    ].map(group => (
+                        <div key={group.region} className="space-y-2">
+                            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide">{group.label}</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                                {frameworks.filter(fw => fw.region === group.region).map(fw => {
+                                    const s = frameworkScore(fw);
+                                    const hasData = s.total > 0;
+                                    return (
+                                        <div key={fw.id} className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col gap-2">
+                                            <div className="flex items-start justify-between gap-2">
+                                                <p className="text-xs text-gray-400 leading-tight">{fw.name}</p>
+                                                {fw.informational && (
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30" title={fw.note || ''}>info</span>
+                                                )}
+                                            </div>
+                                            <p className={`text-3xl font-bold ${scoreColor(s.score)}`}>{s.score == null ? '—' : `${s.score}%`}</p>
+                                            <p className="text-xs text-gray-500">{s.passed}/{s.total} {t('controls') || 'controls'}</p>
+                                            {fw.note && (
+                                                <p className="text-[10px] text-yellow-400/80 leading-tight" title={fw.note}>⚠ {fw.note.slice(0, 80)}{fw.note.length > 80 ? '…' : ''}</p>
+                                            )}
+                                            <button
+                                                onClick={() => downloadFrameworkReport(fw)}
+                                                disabled={!hasData || !selectedCluster}
+                                                className="mt-1 text-xs px-2 py-1 rounded border border-proxmox-border text-gray-300 hover:bg-proxmox-hover disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                <Icons.Download className="w-3 h-3" />
+                                                {t('downloadReport') || 'Download report (PDF)'}
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    ))}
+
+                    {/* Per-node detail for the currently selected cluster */}
+                    {!selectedCluster ? (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center">
+                            <p className="text-sm text-gray-400">{t('noClusterSelected') || 'Select a cluster from the sidebar to view its compliance status.'}</p>
+                        </div>
+                    ) : (() => {
+                        const c = selectedCluster;
+                        const perNode = results[c.id] || {};
+                        const nodes = Object.entries(perNode);
+                        return (
+                            <div key={c.id} className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                <div className="flex items-center justify-between mb-3">
+                                    <div className="flex items-center gap-2">
+                                        <Icons.Server className="w-4 h-4 text-gray-400" />
+                                        <span className="font-medium text-white">{c.name || c.id}</span>
+                                        {loadingCluster === c.id && (
+                                            <span className="text-xs text-gray-500">{t('loading') || 'loading…'}</span>
+                                        )}
+                                    </div>
+                                    <span className="text-xs text-gray-500">{nodes.length} {t('nodes') || 'nodes'}</span>
+                                </div>
+                                {nodes.length === 0 ? (
+                                    <p className="text-xs text-gray-500">{t('noData') || 'No hardening data — cluster offline or SSH unreachable.'}</p>
+                                ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                        {nodes.map(([n, info]) => (
+                                            <div key={n} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-sm text-white">{n}</span>
+                                                    {info.error ? (
+                                                        <span className="text-xs text-red-400">err {info.error}</span>
+                                                    ) : (
+                                                        <span className={`text-sm font-medium ${scoreColor(info.score)}`}>{info.score}%</span>
+                                                    )}
+                                                </div>
+                                                {!info.error && (
+                                                    <p className="text-xs text-gray-500 mt-1">{info.passed}/{info.total} {t('passed') || 'passed'}</p>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })()}
+
+                    {/* Audit activity */}
+                    {auditCounts && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                            <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                                <Icons.FileText className="w-4 h-4 text-blue-400" />
+                                {t('auditActivity') || 'Recent audit activity'} <span className="text-xs text-gray-500 font-normal">({t('lastEntries') || 'last 200 entries'})</span>
+                            </h3>
+                            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                                {[['auth','Auth/Login'],['rbac','RBAC'],['vm','VM ops'],['settings','Settings'],['other','Other']].map(([k, label]) => (
+                                    <div key={k} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3">
+                                        <p className="text-xs text-gray-500">{label}</p>
+                                        <p className="text-2xl font-semibold text-white">{auditCounts[k]}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Quick links */}
+                    <div className="flex items-center gap-3 flex-wrap text-xs">
+                        <button className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded hover:bg-proxmox-hover text-gray-300"
+                            onClick={() => window.dispatchEvent(new CustomEvent('open-settings', { detail: { tab: 'compliance' } }))}>
+                            {t('openSettingsCompliance') || 'Open Settings → Compliance'}
+                        </button>
+                        <span className="text-gray-500">•</span>
+                        <span className="text-gray-500">
+                            {t('complianceProfileNote') || 'Profile: '}<span className="text-gray-300">{profile === 'vs-nfd' ? 'VS-NfD (BSI Grundschutz)' : profile.toUpperCase()}</span>
+                        </span>
+                    </div>
+                </div>
+            );
+        }
+
         // NS: Mar 2026 - Site Recovery tab component (#150)
         function SiteRecoveryTab({ clusters, selectedCluster, authFetch, addToast, t, isCorporate, srProgress, user }) {
             const canManage = user?.permissions?.includes('site_recovery.manage');
@@ -2869,6 +3256,15 @@
                 disk_format:'raw',disk_cache:'none',disk_iothread:true,disk_discard:'on',disk_ssd:false,
                 secure_boot:null,tpm_enabled:null,tpm_version:'v2.0',numa:false,
                 hotplug:'disk,network',agent:true,balloon:0,onboot:false,protection:false,tags:'',description:'',
+                // NS Apr 2026 — OC awareness gate. Kein Hard-Sell, aber pflicht-Acknowledge, damit
+                // Migrations-User wenigstens einmal sehen, wer das ganze sshfs-boot/4K/EFI-Gefrickel
+                // bezahlt. Reset auf false bei jedem neuen Wizard-Run.
+                oc_acknowledge:false,
+                // NS Apr 2026 — opt-in VirtIO driver injection. Default off — Windows boots
+                // sowieso via vmxnet3+pvscsi compatibility, aber wer native Performance will
+                // kann das hier aktivieren. Voraussetzung: virtio-win.iso liegt unter
+                // /var/lib/vz/template/iso/.
+                install_virtio_drivers:false, virtio_iso_path:'',
             });
             const [migrateWizardStep, setMigrateWizardStep] = useState('target'); // target, hardware, advanced
             const [vmwareMigrateLoading, setVmwareMigrateLoading] = useState(false);
@@ -3182,10 +3578,25 @@
             const [hardenLoading, setHardenLoading] = useState(false);
             const [hardenApplying, setHardenApplying] = useState(false);
             const [hardenSelected, setHardenSelected] = useState({});
-            const [hardenParams, setHardenParams] = useState({ backup_dns: { dns1: '1.1.1.1', dns2: '9.9.9.9' } });
+            // NS Apr 2026 — backend hardcodes `root` and `pegaprox` as always-exempted
+            // for the 4 lockout/aging controls. service_user param is for ADDITIONAL
+            // accounts only (e.g. monitoring agents) — empty by default.
+            const [hardenParams, setHardenParams] = useState({
+                backup_dns: { dns1: '1.1.1.1', dns2: '9.9.9.9' },
+                pam_faillock:      { service_user: '' },
+                pw_aging:          { service_user: '' },
+                session_limit:     { service_user: '' },
+                inactive_accounts: { service_user: '' },
+            });
             const [hardenResults, setHardenResults] = useState(null);
             // NS Apr 2026 (#322): verbose audit output
             const [hardenVerbose, setHardenVerbose] = useState(false);
+            // NS Apr 2026 — compliance profile filter for Harden PVE Node.
+            // Mirrors the Compliance Dashboard profile selector. Empty = all controls.
+            const [hardenProfile, setHardenProfile] = useState('');
+            // NS Apr 2026 — live progress while applying. Frontend iterates per-control
+            // so user sees "Applying X (3/15)…" instead of a frozen "Applying…" spinner.
+            const [hardenApplyProgress, setHardenApplyProgress] = useState(null);
             const [hardenExpanded, setHardenExpanded] = useState({});  // {ctrl_id: bool}
 
             // Custom Scripts state - MK Jan 2026
@@ -4677,14 +5088,18 @@
             };
 
             // CIS hardening check/apply
-            const checkHardening = async (nodeName, verbose = false) => {
+            const checkHardening = async (nodeName, verbose = false, profile = '') => {
                 if (!selectedCluster?.id || !nodeName) return;
                 setHardenLoading(true);
                 setHardenStatus(null);
                 setHardenResults(null);
                 setHardenSelected({});
                 try {
-                    const url = `${API_URL}/clusters/${selectedCluster.id}/nodes/${nodeName}/hardening${verbose ? '?verbose=true' : ''}`;
+                    const params = new URLSearchParams();
+                    if (verbose) params.set('verbose', 'true');
+                    if (profile) params.set('profile', profile);
+                    const qs = params.toString();
+                    const url = `${API_URL}/clusters/${selectedCluster.id}/nodes/${nodeName}/hardening${qs ? '?' + qs : ''}`;
                     const resp = await authFetch(url);
                     if (resp && resp.ok) {
                         const data = await resp.json();
@@ -4714,27 +5129,50 @@
                 // NS: warn before modifying system config
                 if (!confirm(`${t('hardenConfirm') || `⚠️ This will apply ${toApply.length} hardening control(s) to "${hardenNode}".\n\nSystem configuration files will be modified. Some changes may require a reboot.\n\nProceed?`}`)) return;
                 setHardenApplying(true);
-                setHardenResults(null);
+                setHardenResults({});
+                // NS Apr 2026 — apply controls one at a time so the user gets live feedback
+                // ("Applying ssh_crypto (4/15)…") instead of a frozen single spinner. Each
+                // backend call is short (~few seconds for cheap ones, up to 60s for SSH-heavy
+                // ones like fail2ban). Per-control HTTP overhead is negligible vs. SSH runtime.
+                const accumulated = {};
+                let appliedOk = 0;
                 try {
-                    const resp = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/nodes/${hardenNode}/hardening`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ controls: toApply, params: hardenParams })
-                    });
-                    if (resp && resp.ok) {
-                        const data = await resp.json();
-                        setHardenResults(data.results);
-                        addToast(`${data.applied}/${data.total} ${t('controlsApplied') || 'controls applied'}`, data.applied === data.total ? 'success' : 'warning');
-                        // refresh status
-                        checkHardening(hardenNode);
-                    } else {
-                        const errData = await resp?.json().catch(() => ({}));
-                        addToast(errData?.error || 'Apply failed', 'error');
+                    for (let i = 0; i < toApply.length; i++) {
+                        const ctrlId = toApply[i];
+                        setHardenApplyProgress({ current: ctrlId, done: i, total: toApply.length });
+                        try {
+                            const resp = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/nodes/${hardenNode}/hardening`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    controls: [ctrlId],
+                                    params: hardenParams && hardenParams[ctrlId] ? { [ctrlId]: hardenParams[ctrlId] } : {},
+                                })
+                            });
+                            if (resp && resp.ok) {
+                                const data = await resp.json();
+                                const r = (data.results || {})[ctrlId] || { success: false, error: 'no result' };
+                                accumulated[ctrlId] = r;
+                                if (r.success) appliedOk++;
+                            } else {
+                                const errData = await resp?.json().catch(() => ({}));
+                                accumulated[ctrlId] = { success: false, error: errData?.error || `HTTP ${resp?.status}` };
+                            }
+                        } catch (perCtrlErr) {
+                            accumulated[ctrlId] = { success: false, error: String(perCtrlErr) };
+                        }
+                        // Live UI update — show per-control result as it lands
+                        setHardenResults({ ...accumulated });
                     }
+                    addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`, appliedOk === toApply.length ? 'success' : 'warning');
+                    // refresh status
+                    checkHardening(hardenNode, hardenVerbose, hardenProfile);
                 } catch (e) {
                     addToast('Error: ' + e.message, 'error');
+                } finally {
+                    setHardenApplyProgress(null);
+                    setHardenApplying(false);
                 }
-                setHardenApplying(false);
             };
 
             // Load favorites and summary on mount
@@ -8846,12 +9284,14 @@
                                                 { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
                                                 { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
                                                 { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
+                                                { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
                                                 { id: 'site-recovery', labelKey: 'siteRecovery', icon: Icons.Shield },
                                                 { id: 'plugins', labelKey: 'plugins', icon: Icons.Package },
                                                 { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
                                             ].filter(tab => {
                                                 if (tab.id === 'site-recovery') return user?.permissions?.includes('site_recovery.view');
                                                 if (tab.id === 'plugins') return user?.permissions?.includes('plugins.view');
+                                                if (tab.id === 'compliance') return user?.permissions?.includes('admin.audit') || user?.permissions?.includes('node.maintenance');
                                                 return true;
                                             }).map(tab => (
                                                 <button
@@ -10270,7 +10710,7 @@
                                                         <div className="flex items-center gap-3 flex-wrap">
                                                             <select
                                                                 value={hardenNode}
-                                                                onChange={e => { setHardenNode(e.target.value); setHardenStatus(null); setHardenResults(null); setHardenSelected({}); }}
+                                                                onChange={e => { setHardenNode(e.target.value); setHardenStatus(null); setHardenResults(null); setHardenSelected({}); setHardenProfile(''); }}
                                                                 className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm flex-1 max-w-xs"
                                                             >
                                                                 <option value="">{t('selectNode') || 'Select a node...'}</option>
@@ -10279,7 +10719,7 @@
                                                                 ))}
                                                             </select>
                                                             <button
-                                                                onClick={() => checkHardening(hardenNode, hardenVerbose)}
+                                                                onClick={() => checkHardening(hardenNode, hardenVerbose, hardenProfile)}
                                                                 disabled={!hardenNode || hardenLoading}
                                                                 className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 ${
                                                                     !hardenNode || hardenLoading ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-proxmox-orange hover:bg-orange-600 text-white'
@@ -10287,6 +10727,27 @@
                                                             >
                                                                 {hardenLoading ? <><Icons.RotateCw className="w-4 h-4 animate-spin" /> {t('checking') || 'Checking...'}</> : <><Icons.Shield className="w-4 h-4" /> {t('checkStatus') || 'Check Status'}</>}
                                                             </button>
+                                                            {/* NS Apr 2026 — compliance profile filter (BSI/ISO/NIS2/VS-NfD/CMMC/...).
+                                                                Same profile list as the Compliance Dashboard so audits match. */}
+                                                            <select
+                                                                value={hardenProfile}
+                                                                onChange={e => { setHardenProfile(e.target.value); setHardenStatus(null); setHardenSelected({}); }}
+                                                                className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
+                                                                title={t('hardenProfileHint') || 'Filter controls by compliance framework. All controls = full CIS+Lynis+STIG+PegaProx set.'}>
+                                                                <option value="">{t('hardenProfileAll') || 'All controls'}</option>
+                                                                <optgroup label={t('regionEU') || 'EU / DACH'}>
+                                                                    <option value="bsi">BSI IT-Grundschutz</option>
+                                                                    <option value="iso">ISO 27001 (Annex A)</option>
+                                                                    <option value="nis2">NIS2 / KRITIS</option>
+                                                                    <option value="vs-nfd">VS-NfD (BSI)</option>
+                                                                </optgroup>
+                                                                <optgroup label={t('regionUS') || 'US Defense / Federal'}>
+                                                                    <option value="cmmc1">CMMC L1 (FAR 52.204-21)</option>
+                                                                    <option value="cmmc2">CMMC L2 / NIST 800-171</option>
+                                                                    <option value="nist53">NIST 800-53 (Mod)</option>
+                                                                    <option value="stig">DISA STIG</option>
+                                                                </optgroup>
+                                                            </select>
                                                             {/* NS Apr 2026 (#322): verbose audit toggle */}
                                                             <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer" title={t('verboseHint') || 'Include raw check output per control — useful for audit reports'}>
                                                                 <input type="checkbox" checked={hardenVerbose} onChange={e => setHardenVerbose(e.target.checked)}
@@ -10359,6 +10820,16 @@
                                                                 // MK Apr 2026 — brute-force protection for SSH + PVE Web-UI
                                                                 pve_fail2ban: { ref: 'Brute-Force', title: t('pegaFail2ban') || 'fail2ban — SSH + PVE Web-UI', desc: t('pegaFail2banDesc') || 'Installs fail2ban with jails for sshd and Proxmox Web-UI/API authentication. Policy: 5 failed logins in 10 minutes trigger a 24h IP ban. File-marker /etc/fail2ban/jail.d/pegaprox-pve.conf makes re-apply safe.', impact: t('pegaFail2banImpact') || 'Negligible — reads /var/log/daemon.log + /var/log/auth.log. Review banned IPs with `fail2ban-client status proxmox`.' },
                                                             };
+                                                            // NS Apr 2026 — VS-NfD informational checks (audit-only, apply is no-op).
+                                                            // BSI Grundschutz expects documented operator decision per environment.
+                                                            const vsnfdControls = {
+                                                                vsnfd_disk_encryption: { ref: 'BSI VS-NfD', title: t('vsnfdDiskEnc') || 'Disk encryption (LUKS / ZFS native)', desc: t('vsnfdDiskEncDesc') || 'Reports whether root/data volumes use LUKS or ZFS native encryption. Audit-only — must be configured at install time.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
+                                                                vsnfd_audit_retention: { ref: 'BSI Grundschutz', title: t('vsnfdAuditRet') || 'journald retention ≥ 6 months', desc: t('vsnfdAuditRetDesc') || 'Checks journald MaxRetentionSec is set to at least 6 months. BSI requires audit log retention ≥ 180 days.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
+                                                                vsnfd_journald_size: { ref: 'BSI Grundschutz', title: t('vsnfdJournaldSize') || 'journald SystemMaxUse ≥ 1G', desc: t('vsnfdJournaldSizeDesc') || 'Ensures journald can keep enough log volume to satisfy retention requirements.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
+                                                                vsnfd_secure_boot: { ref: 'BSI VS-NfD', title: t('vsnfdSecureBoot') || 'UEFI Secure Boot enabled', desc: t('vsnfdSecureBootDesc') || 'Reports whether the firmware enforces signed boot loaders. Cannot be toggled live — must be enabled in firmware.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
+                                                                vsnfd_kernel_lockdown: { ref: 'BSI VS-NfD', title: t('vsnfdLockdown') || 'Kernel lockdown (integrity / confidentiality)', desc: t('vsnfdLockdownDesc') || 'Checks /sys/kernel/security/lockdown. BSI recommends "integrity" or "confidentiality". Set via kernel cmdline lockdown=integrity at boot.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
+                                                                vsnfd_password_min_12: { ref: 'BSI Grundschutz', title: t('vsnfdPwMin12') || 'Password minlen ≥ 12 (BSI)', desc: t('vsnfdPwMin12Desc') || 'BSI requires minimum 12-character passwords (stricter than CIS-L1\'s 8). Configure via pwquality minlen.', impact: t('vsnfdInformational') || 'Informational only — set via pw_quality CIS control' },
+                                                            };
                                                             const controls = hardenStatus.controls || {};
                                                             // NS Apr 2026: verbose result is {status, evidence, command}, non-verbose is bool
                                                             const _isApplied = v => typeof v === 'object' ? v?.status === true : v === true;
@@ -10375,12 +10846,36 @@
                                                                 const evidence = isVerboseData ? (ctrlData.evidence || '') : '';
                                                                 const checkCmd = isVerboseData ? (ctrlData.command || '') : '';
                                                                 const failed = hardenResults?.[id]?.success === false;
+                                                                // NS Apr 2026 — three live states during apply:
+                                                                //   inFlight = this control is currently being applied (spinner)
+                                                                //   queued   = selected but not yet processed (dim badge)
+                                                                //   freshly applied / failed already reflected via hardenResults
+                                                                const inFlight = hardenApplying && hardenApplyProgress?.current === id;
+                                                                const justApplied = hardenResults?.[id]?.success === true;
+                                                                const queued = hardenApplying && !!hardenSelected[id] && !hardenResults?.[id] && !inFlight;
                                                                 const expanded = !!hardenExpanded[id];
                                                                 return (
-                                                                <div key={id} className={`bg-proxmox-card border rounded-xl overflow-hidden ${applied ? 'border-green-500/30' : 'border-proxmox-border'}`}>
+                                                                <div key={id} className={`bg-proxmox-card border rounded-xl overflow-hidden ${
+                                                                    inFlight ? 'border-blue-500/60 ring-1 ring-blue-500/30' :
+                                                                    justApplied ? 'border-emerald-500/50' :
+                                                                    failed ? 'border-red-500/50' :
+                                                                    applied ? 'border-green-500/30' : 'border-proxmox-border'
+                                                                }`}>
                                                                     <div className="flex items-center gap-3 p-3">
                                                                         <div className="flex-shrink-0">
-                                                                            {applied ? (
+                                                                            {inFlight ? (
+                                                                                <div className="w-5 h-5 rounded bg-blue-500/20 flex items-center justify-center" title={t('applyingControl') || 'Applying…'}>
+                                                                                    <Icons.RotateCw className="w-3.5 h-3.5 text-blue-400 animate-spin" />
+                                                                                </div>
+                                                                            ) : justApplied ? (
+                                                                                <div className="w-5 h-5 rounded bg-emerald-500/30 flex items-center justify-center" title={t('justApplied') || 'Just applied'}>
+                                                                                    <Icons.Check className="w-3.5 h-3.5 text-emerald-300" />
+                                                                                </div>
+                                                                            ) : queued ? (
+                                                                                <div className="w-5 h-5 rounded bg-gray-700/40 flex items-center justify-center" title={t('queued') || 'Queued'}>
+                                                                                    <span className="text-[10px] text-gray-400">…</span>
+                                                                                </div>
+                                                                            ) : applied ? (
                                                                                 <div className="w-5 h-5 rounded bg-green-500/20 flex items-center justify-center" title={t('alreadyApplied') || 'Already applied'}>
                                                                                     <Icons.Check className="w-3.5 h-3.5 text-green-400" />
                                                                                 </div>
@@ -10414,6 +10909,22 @@
                                                                                     <input type="text" value={hardenParams.backup_dns?.dns2 || '9.9.9.9'}
                                                                                         onChange={e => setHardenParams(p => ({...p, backup_dns: {...p.backup_dns, dns2: e.target.value}}))}
                                                                                         className="w-28 px-2 py-0.5 text-xs bg-proxmox-dark border border-proxmox-border rounded text-white" placeholder="9.9.9.9" />
+                                                                                </div>
+                                                                            )}
+                                                                            {/* NS Apr 2026 — `root` and `pegaprox` are hardcoded as always-exempted
+                                                                                server-side. The optional input lets the operator add MORE service
+                                                                                accounts (e.g. monitoring agents) — empty by default = just root + pegaprox. */}
+                                                                            {(id === 'pam_faillock' || id === 'pw_aging' || id === 'session_limit' || id === 'inactive_accounts') && !applied && (
+                                                                                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                                                                                    <span className="text-xs text-gray-500">{t('exemptUsers') || 'Exempt users'}:</span>
+                                                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30" title={t('alwaysExempt') || 'always exempted'}>root</span>
+                                                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30" title={t('alwaysExempt') || 'always exempted'}>pegaprox</span>
+                                                                                    <span className="text-xs text-gray-500">{t('plusOptional') || '+ optional'}:</span>
+                                                                                    <input type="text"
+                                                                                        value={hardenParams[id]?.service_user ?? ''}
+                                                                                        onChange={e => setHardenParams(p => ({...p, [id]: { ...(p[id] || {}), service_user: e.target.value }}))}
+                                                                                        className="w-44 px-2 py-0.5 text-xs bg-proxmox-dark border border-proxmox-border rounded text-white"
+                                                                                        placeholder={t('extraServiceUsers') || 'monitoring,backup'} />
                                                                                 </div>
                                                                             )}
                                                                             {/* NS Apr 2026 (#322): verbose audit evidence — collapsible per-control */}
@@ -10475,6 +10986,7 @@
                                                                     { name: 'Lynis Security Auditing', ctrls: lynisControls, src: 'lynis' },
                                                                     { name: 'STIG — DoD Security Technical Implementation Guide', ctrls: stigControls, src: 'stig' },
                                                                     { name: 'PegaProx ' + (t('recommendations') || 'Recommendations'), ctrls: pegaControls, src: 'pega' },
+                                                                    { name: 'VS-NfD / BSI Grundschutz (' + (t('informational') || 'informational') + ')', ctrls: vsnfdControls, src: 'vsnfd' },
                                                                 ];
                                                                 const statusLbl = (applied, failed) => failed ? (t('failed') || 'Failed') : applied ? (t('applied') || 'Applied') : (t('notApplied') || 'Not applied');
                                                                 const blocks = [
@@ -10505,7 +11017,7 @@
                                                                 const verboseItems = Object.entries(controls).filter(([, v]) => v && typeof v === 'object' && (v.evidence || v.command));
                                                                 if (verboseItems.length > 0) {
                                                                     blocks.push({ type: 'spacer', height: 4 });
-                                                                    const allTitles = {...cisControls, ...lynisControls, ...stigControls, ...pegaControls};
+                                                                    const allTitles = {...cisControls, ...lynisControls, ...stigControls, ...pegaControls, ...vsnfdControls};
                                                                     blocks.push({
                                                                         type: 'table',
                                                                         title: t('auditEvidence') || 'Audit evidence',
@@ -10558,7 +11070,11 @@
                                                                             hardenApplying || selectedCount === 0 ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-green-600 hover:bg-green-500 text-white'
                                                                         }`}
                                                                     >
-                                                                        {hardenApplying ? <><Icons.RotateCw className="w-4 h-4 animate-spin" /> {t('applying') || 'Applying...'}</> : <><Icons.Shield className="w-4 h-4" /> {t('applySelected') || 'Apply Selected'} ({selectedCount})</>}
+                                                                        {hardenApplying ? (
+                                                                            hardenApplyProgress
+                                                                                ? <><Icons.RotateCw className="w-4 h-4 animate-spin" /> {hardenApplyProgress.done}/{hardenApplyProgress.total}: <span className="font-mono text-[11px]">{hardenApplyProgress.current}</span></>
+                                                                                : <><Icons.RotateCw className="w-4 h-4 animate-spin" /> {t('applying') || 'Applying...'}</>
+                                                                        ) : <><Icons.Shield className="w-4 h-4" /> {t('applySelected') || 'Apply Selected'} ({selectedCount})</>}
                                                                     </button>
                                                                 </div>
 
@@ -10572,11 +11088,12 @@
                                                                         <span className="text-xs text-gray-500 font-normal">v1.0.0</span>
                                                                     </h3>
                                                                     <div className="space-y-2">
-                                                                        {Object.entries(cisControls).map(([id, info]) => renderControl(id, info, 'cis'))}
+                                                                        {Object.entries(cisControls).filter(([id]) => id in controls).map(([id, info]) => renderControl(id, info, 'cis'))}
                                                                     </div>
                                                                 </div>
 
                                                                 {/* Lynis section */}
+                                                                {Object.entries(lynisControls).some(([id]) => id in controls) && (
                                                                 <div>
                                                                     <h3 className="text-sm font-semibold text-purple-400 mb-2 flex items-center gap-2">
                                                                         <Icons.Terminal className="w-4 h-4" />
@@ -10584,11 +11101,13 @@
                                                                         <span className="text-xs text-gray-500 font-normal">{t('lynisRecommendations') || 'Recommendations'}</span>
                                                                     </h3>
                                                                     <div className="space-y-2">
-                                                                        {Object.entries(lynisControls).map(([id, info]) => renderControl(id, info, 'lynis'))}
+                                                                        {Object.entries(lynisControls).filter(([id]) => id in controls).map(([id, info]) => renderControl(id, info, 'lynis'))}
                                                                     </div>
                                                                 </div>
+                                                                )}
 
                                                                 {/* STIG (DoD) section */}
+                                                                {Object.entries(stigControls).some(([id]) => id in controls) && (
                                                                 <div>
                                                                     <h3 className="text-sm font-semibold text-amber-400 mb-2 flex items-center gap-2">
                                                                         <Icons.Lock className="w-4 h-4" />
@@ -10596,20 +11115,39 @@
                                                                         <span className="text-xs text-gray-500 font-normal">{t('stigRecommendations') || 'Guidelines'}</span>
                                                                     </h3>
                                                                     <div className="space-y-2">
-                                                                        {Object.entries(stigControls).map(([id, info]) => renderControl(id, info, 'stig'))}
+                                                                        {Object.entries(stigControls).filter(([id]) => id in controls).map(([id, info]) => renderControl(id, info, 'stig'))}
                                                                     </div>
                                                                 </div>
+                                                                )}
 
                                                                 {/* PegaProx Recommendations section */}
+                                                                {Object.entries(pegaControls).some(([id]) => id in controls) && (
                                                                 <div>
                                                                     <h3 className="text-sm font-semibold text-orange-400 mb-2 flex items-center gap-2">
                                                                         <Icons.Zap className="w-4 h-4" />
                                                                         PegaProx {t('recommendations') || 'Recommendations'}
                                                                     </h3>
                                                                     <div className="space-y-2">
-                                                                        {Object.entries(pegaControls).map(([id, info]) => renderControl(id, info, 'pega'))}
+                                                                        {Object.entries(pegaControls).filter(([id]) => id in controls).map(([id, info]) => renderControl(id, info, 'pega'))}
                                                                     </div>
                                                                 </div>
+                                                                )}
+
+                                                                {/* NS Apr 2026 — VS-NfD informational section. Only shown when at least one
+                                                                    vsnfd_* control was returned (profile=vs-nfd or 'All controls' on a node
+                                                                    where the helper checked them). */}
+                                                                {Object.entries(vsnfdControls).some(([id]) => id in controls) && (
+                                                                    <div>
+                                                                        <h3 className="text-sm font-semibold text-emerald-400 mb-2 flex items-center gap-2">
+                                                                            <Icons.Lock className="w-4 h-4" />
+                                                                            VS-NfD / BSI Grundschutz
+                                                                            <span className="text-xs text-gray-500 font-normal">({t('informational') || 'informational'})</span>
+                                                                        </h3>
+                                                                        <div className="space-y-2">
+                                                                            {Object.entries(vsnfdControls).filter(([id]) => id in controls).map(([id, info]) => renderControl(id, info, 'vsnfd'))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
                                                                 </div>
 
                                                                 {/* select all / none helper */}
@@ -11327,6 +11865,23 @@
                                                     </div>
                                                 )}
                                             </div>
+                                        )}
+
+                                        {/* NS Apr 2026 — Compliance Dashboard (top-level tab).
+                                            Admin-side config stays in Settings → Compliance;
+                                            this is a read-only audit view for ops/Compliance Officers
+                                            without admin rights. Available with admin.audit OR
+                                            node.maintenance permission. */}
+                                        {activeTab === 'compliance' && (
+                                            <ComplianceDashboardTab
+                                                clusters={clusters}
+                                                selectedCluster={selectedCluster}
+                                                authFetch={authFetch}
+                                                addToast={addToast}
+                                                t={t}
+                                                isCorporate={isCorporate}
+                                                user={user}
+                                            />
                                         )}
 
                                         {/* Site Recovery Tab */}
@@ -14442,9 +14997,75 @@
                                                             </div>
                                                             )}
                                                             
+                                                            {/* NS Apr 2026 — VirtIO driver pre-staging (opt-in). Off by default;
+                                                                checks for virtio-win.iso on the Proxmox node and injects storage
+                                                                drivers + registry entries before first boot so the user can switch
+                                                                scsihw to virtio-scsi-pci without BSOD. */}
+                                                            <div className="mt-3 p-3 rounded-lg border border-proxmox-border" style={{background: 'rgba(30,30,40,0.4)'}}>
+                                                                <label className="flex items-start gap-2 cursor-pointer">
+                                                                    <input type="checkbox"
+                                                                        checked={!!vmwareMigrateForm.install_virtio_drivers}
+                                                                        onChange={e => setVmwareMigrateForm(f => ({...f, install_virtio_drivers: e.target.checked}))}
+                                                                        className="rounded mt-0.5" />
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <span className="text-sm text-gray-200">
+                                                                            {t('installVirtioDrivers') || 'Pre-stage VirtIO drivers (Windows)'}
+                                                                        </span>
+                                                                        <p className="text-xs text-gray-400 mt-1 leading-snug">
+                                                                            {t('installVirtioDriversDesc') || 'Offline-injects viostor/vioscsi/NetKVM into the Windows install before first boot — lets you swap to virtio-scsi-pci/virtio-net for native paravirt speed without BSOD. Requires virtio-win.iso on the target node.'}
+                                                                        </p>
+                                                                    </div>
+                                                                </label>
+                                                                {vmwareMigrateForm.install_virtio_drivers && (
+                                                                    <div className="mt-2 pl-6">
+                                                                        <label className="text-xs text-gray-500 mb-1 block">{t('virtioIsoPath') || 'virtio-win.iso path on node'}</label>
+                                                                        <input type="text"
+                                                                            value={vmwareMigrateForm.virtio_iso_path}
+                                                                            onChange={e => setVmwareMigrateForm(f => ({...f, virtio_iso_path: e.target.value}))}
+                                                                            placeholder="/var/lib/vz/template/iso/virtio-win.iso (default)"
+                                                                            className="w-full px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs" />
+                                                                    </div>
+                                                                )}
+                                                                {vmwareMigrateForm.install_virtio_drivers && vmwareMigrateForm.transfer_mode === 'sshfs_boot' && (
+                                                                    <div className="mt-2 pl-6 p-2 rounded border border-yellow-500/40" style={{background:'rgba(234,179,8,0.07)'}}>
+                                                                        <p className="text-xs text-yellow-300 leading-snug">
+                                                                            ⚠ {t('virtioSshfsBootWarn') || 'Live-mirror mode boots the VM before disks are settled — offline driver injection would corrupt the running NTFS. Pre-staging is skipped here. Use offline / auto / snapshot_zero for pre-stage, or install drivers post-boot from the mounted virtio-win.iso.'}
+                                                                        </p>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+
+                                                            {/* NS Apr 2026 — OpenCollective awareness banner. Subtle slate card, kein Popup,
+                                                                kein Disable des Wizards selbst. Nur die finale Start-Migration ist gated bis
+                                                                der User einmal acknowledged hat. Logo unter /images/oc_contribute_button.png. */}
+                                                            <div className="mt-4 p-3 rounded-lg border border-proxmox-border" style={{background: 'rgba(99, 110, 250, 0.06)'}}>
+                                                                <div className="flex items-start gap-3">
+                                                                    <a href="https://opencollective.com/pegaprox" target="_blank" rel="noopener noreferrer" className="shrink-0">
+                                                                        <img src="/images/oc_contribute_button.png" alt="Open Collective"
+                                                                            className="h-8 w-auto opacity-90 hover:opacity-100 transition-opacity" />
+                                                                    </a>
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <p className="text-xs text-gray-300 leading-snug">
+                                                                            {t('v2pSupportNote') || 'Nur mit eurer Unterstützung können wir diese Funktion kostenlos halten.'}
+                                                                        </p>
+                                                                        <label className="flex items-center gap-2 mt-2 text-xs text-gray-400 cursor-pointer">
+                                                                            <input type="checkbox"
+                                                                                checked={!!vmwareMigrateForm.oc_acknowledge}
+                                                                                onChange={e => setVmwareMigrateForm(f => ({...f, oc_acknowledge: e.target.checked}))}
+                                                                                className="rounded" />
+                                                                            <span>{t('v2pSupportAck') || 'Verstanden — ich behalte das im Hinterkopf.'}</span>
+                                                                        </label>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
                                                             <div className="flex gap-2 justify-end mt-4">
                                                                 <button onClick={() => setShowVmwareMigrate(false)} className="px-4 py-2 rounded-lg bg-proxmox-dark text-gray-400 text-sm">Cancel</button>
-                                                                <button onClick={() => startVmwareMigration(vmwareSelectedVm)} disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || vmwareMigrateLoading} className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
+                                                                <button
+                                                                    onClick={() => startVmwareMigration(vmwareSelectedVm)}
+                                                                    disabled={!vmwareMigrateForm.target_cluster || !vmwareMigrateForm.target_node || !vmwareMigrateForm.target_storage || !vmwareMigrateForm.esxi_password || !vmwareMigrateForm.oc_acknowledge || vmwareMigrateLoading}
+                                                                    title={!vmwareMigrateForm.oc_acknowledge ? (t('v2pSupportAckRequired') || 'Bitte den Hinweis kurz bestätigen') : ''}
+                                                                    className="px-4 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium disabled:opacity-50">
                                                                     {vmwareMigrateLoading ? 'Starting...' : 'Start Migration'}
                                                                 </button>
                                                             </div>

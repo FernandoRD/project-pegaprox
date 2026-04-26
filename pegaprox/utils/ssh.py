@@ -72,14 +72,23 @@ task_pegaprox_users_cache = {}  # In-memory cache for fast lookups
 task_pegaprox_users_lock = threading.Lock()
 TASK_USER_CACHE_TTL = 86400  # Keep for 24 hours (in DB, will be cleaned on startup)
 
-def _ssh_exec(host, user, password, cmd, timeout=30):
+def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False):
     """Execute command on remote host via SSH.
     Handles ESXi which only allows 'keyboard-interactive' and 'publickey'.
-    
+
     ESXi SSH quirks:
     - Only allows keyboard-interactive and publickey auth (NOT password)
     - Older ESXi (6.x/7.x) uses legacy kex/key algorithms that modern
       paramiko disables by default (diffie-hellman-group14-sha1, ssh-rsa)
+
+    NS Apr 2026 (Phase 2):
+    - use_controlmaster=True enables OpenSSH ControlMaster sharing on the
+      subprocess fallback path. First call to a host opens the master TCP+
+      auth, follow-up calls within ControlPersist (300s) reuse it — ~90 %
+      latency reduction on wiederholte Calls. If the master can't be opened
+      (no /run write, OpenSSH < 5.6, etc.), falls back to fresh connections
+      with no error. HA paths in core/manager.py do NOT use this — they
+      have their own subprocess+paramiko paths and are intentionally untouched.
     """
     last_err = ''
     errors = []
@@ -250,16 +259,26 @@ def _ssh_exec(host, user, password, cmd, timeout=30):
         import subprocess
         env = os.environ.copy()
         env['SSHPASS'] = password
-        result = subprocess.run(
-            ['sshpass', '-e', 'ssh',
+        ssh_args = ['sshpass', '-e', 'ssh',
              '-o', 'StrictHostKeyChecking=accept-new',
              '-o', f'UserKnownHostsFile={_known_hosts}',
              '-o', 'LogLevel=ERROR',
              '-o', 'PreferredAuthentications=keyboard-interactive,password',
              '-o', 'HostKeyAlgorithms=+ssh-rsa,ssh-ed25519,ecdsa-sha2-nistp256',
              '-o', 'PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-ed25519',
-             '-o', 'KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256',
-             f'{user}@{host}', cmd],
+             '-o', 'KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256']
+        # NS Apr 2026 — ControlMaster opt-in. Adds connection-sharing args.
+        # If the helper can't create the socket dir, returns []  → no-op.
+        if use_controlmaster:
+            try:
+                from pegaprox.utils.ssh_pool import controlmaster_args
+                ssh_args.extend(controlmaster_args(host, user))
+            except Exception as _cm_err:
+                # any import / setup error → fall through, ssh just runs without sharing
+                pass
+        ssh_args.extend([f'{user}@{host}', cmd])
+        result = subprocess.run(
+            ssh_args,
             capture_output=True, text=True, timeout=timeout, env=env
         )
         if result.returncode == 0:
@@ -272,9 +291,16 @@ def _ssh_exec(host, user, password, cmd, timeout=30):
 
 _node_ip_cache = {}  # (cluster_id, node) -> (ip, timestamp)
 
-def _pve_node_exec(pve_mgr, node, cmd, timeout=600):
+def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True):
     """Execute a command on a Proxmox node via the Proxmox API.
-    Uses POST /nodes/{node}/execute or falls back to SSH."""
+    Uses POST /nodes/{node}/execute or falls back to SSH.
+
+    NS Apr 2026 — Phase 2: use_controlmaster=True enables OpenSSH connection
+    sharing on the SSH fallback path. Multiple calls to the same node within
+    300s reuse the master connection (skips TCP+crypto+auth handshake).
+    Pass use_controlmaster=False for one-shot calls where you don't want a
+    persistent socket (rare). HA-critical SSH in core/manager.py does NOT
+    go through this function."""
     # Method 1: Try Proxmox API exec (PVE 7.4+)
     try:
         resp = pve_mgr._api_post(
@@ -314,7 +340,8 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600):
     _node_ip_cache[cache_key] = (node_host, time.time())
     
     try:
-        rc, out, err = _ssh_exec(node_host, 'root', pve_mgr.config.pass_, cmd, timeout=timeout)
+        rc, out, err = _ssh_exec(node_host, 'root', pve_mgr.config.pass_, cmd,
+                                  timeout=timeout, use_controlmaster=use_controlmaster)
         return rc, out, err
     except Exception as e:
         return 1, '', str(e)

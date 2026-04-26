@@ -896,31 +896,87 @@
             const StorageRow = ({ storage, node, isShared }) => {
                 const usedPercent = storage.total ? Math.round(storage.used / storage.total * 100) : 0;
                 const isSelected = selectedStorage?.name === storage.storage && selectedStorage?.node === node;
-                
+                // NS Apr 2026 — three honest states:
+                //   - unreachable: active=0 OR enabled=0 → red badge, dim row, no bar
+                //   - raw: active=1 but total=0 → typical iSCSI raw block / RBD without
+                //     a usage layer — Proxmox doesn't report stats but storage IS healthy.
+                //     Show "raw block device" hint instead of a fake "0 B / 0 B".
+                //   - normal: active=1 + total>0 → real numbers + bar
+                const isUnreachable = storage.active === 0 || storage.enabled === 0;
+                const isRaw = !isUnreachable && (storage.total === 0 && storage.used === 0);
+                // Per-node reachability hint for shared storages (backend now reports active_on/inactive_on)
+                const partial = isShared && Array.isArray(storage.active_on) && Array.isArray(storage.inactive_on)
+                    && storage.active_on.length > 0 && storage.inactive_on.length > 0;
+                const partialHint = partial
+                    ? `${t('activeOn') || 'Active on'}: ${storage.active_on.join(', ')} — ${t('unreachableFrom') || 'unreachable from'}: ${storage.inactive_on.join(', ')}`
+                    : null;
+
+                let rowTitle;
+                if (isUnreachable) rowTitle = t('storageUnreachableHint') || `${storage.storage} is configured but not reachable from ${node || 'this node'} — check network / mount / credentials`;
+                else if (partial) rowTitle = partialHint;
+                else if (isRaw) rowTitle = t('storageRawHint') || `${storage.type} raw block storage — Proxmox does not report usage stats for this storage type`;
+
+                // NS Apr 2026 — when clicking a shared row, route content fetch through
+                // a node that can actually reach the storage (active_on[0]). Without this,
+                // clicking "Proxmox" with pve1 reachable + pve2 dead would query pve2 and
+                // return empty — user would think the storage is empty.
+                const clickNode = node || (Array.isArray(storage.active_on) && storage.active_on.length > 0 ? storage.active_on[0] : null);
+
                 return (
-                    <div 
+                    <div
                         className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-all ${
                             isSelected ? 'bg-proxmox-orange/20 border border-proxmox-orange/50' : 'bg-proxmox-dark hover:bg-proxmox-hover'
-                        }`}
-                        onClick={() => loadStorageContent(storage.storage, node)}
+                        } ${isUnreachable ? 'opacity-60' : ''}`}
+                        onClick={() => loadStorageContent(storage.storage, clickNode)}
+                        title={rowTitle}
                     >
                         <div className="flex items-center gap-3">
                             <span className="text-lg">{getContentIcon(storage.content)}</span>
                             <div>
-                                <div className="font-medium text-white">{storage.storage}</div>
+                                <div className="font-medium text-white flex items-center gap-1.5 flex-wrap">
+                                    {storage.storage}
+                                    {isUnreachable && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30">
+                                            {t('storageUnreachable') || 'unreachable'}
+                                        </span>
+                                    )}
+                                    {!isUnreachable && partial && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
+                                            title={partialHint}>
+                                            {storage.active_on.length}/{storage.active_on.length + storage.inactive_on.length} {t('nodes') || 'nodes'}
+                                        </span>
+                                    )}
+                                    {!isUnreachable && isRaw && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                                            {t('storageRaw') || 'raw'}
+                                        </span>
+                                    )}
+                                </div>
                                 <div className="text-xs text-gray-500">
                                     <span className={getTypeColor(storage.type)}>{storage.type}</span>
                                 </div>
                             </div>
                         </div>
                         <div className="text-right">
-                            <div className="text-sm text-white">{formatSize(storage.used)} / {formatSize(storage.total)}</div>
-                            <div className="w-24 h-1.5 bg-proxmox-border rounded-full mt-1">
-                                <div 
-                                    className={`h-full rounded-full ${usedPercent > 90 ? 'bg-red-500' : usedPercent > 70 ? 'bg-yellow-500' : 'bg-green-500'}`}
-                                    style={{ width: `${Math.min(usedPercent, 100)}%` }}
-                                />
-                            </div>
+                            {isUnreachable ? (
+                                <div className="text-xs text-gray-500 italic">
+                                    {t('storageUnreachableShort') || 'no data'}
+                                </div>
+                            ) : isRaw ? (
+                                <div className="text-xs text-gray-500 italic">
+                                    {t('storageRawNoUsage') || 'no usage stats'}
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="text-sm text-white">{formatSize(storage.used)} / {formatSize(storage.total)}</div>
+                                    <div className="w-24 h-1.5 bg-proxmox-border rounded-full mt-1">
+                                        <div
+                                            className={`h-full rounded-full ${usedPercent > 90 ? 'bg-red-500' : usedPercent > 70 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                            style={{ width: `${Math.min(usedPercent, 100)}%` }}
+                                        />
+                                    </div>
+                                </>
+                            )}
                         </div>
                     </div>
                 );
@@ -1253,14 +1309,43 @@
                                 ) : (
                                     /* Original Storage Content */
                                     <>
-                                        <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center">
-                                            <h3 className="font-semibold flex items-center gap-2">
+                                        <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center flex-wrap gap-2">
+                                            <h3 className="font-semibold flex items-center gap-2 flex-wrap">
                                                 <Icons.Folder />
                                                 {selectedStorage ? (
                                                     <>{t('content') || 'Content'}: {selectedStorage.name}</>
                                                 ) : (
                                                     t('selectStorage') || 'Select a storage'
                                                 )}
+                                                {/* NS Apr 2026 — when a shared storage is reachable from multiple
+                                                    nodes (and the row showed "1/2 nodes"), let the user pick which
+                                                    node's view to load. Stats are equal across active nodes but the
+                                                    content listing always queries a specific node. */}
+                                                {selectedStorage && (() => {
+                                                    const sharedDef = datastores.shared?.find(s => s.storage === selectedStorage.name);
+                                                    const activeOn = Array.isArray(sharedDef?.active_on) ? sharedDef.active_on : [];
+                                                    const inactiveOn = Array.isArray(sharedDef?.inactive_on) ? sharedDef.inactive_on : [];
+                                                    if (activeOn.length === 0) return null;
+                                                    const showSwitcher = activeOn.length > 1 || inactiveOn.length > 0;
+                                                    if (!showSwitcher) return null;
+                                                    return (
+                                                        <span className="flex items-center gap-1.5 text-xs font-normal">
+                                                            <span className="text-gray-500">— {t('viewFromNode') || 'view from'}:</span>
+                                                            <select
+                                                                value={selectedStorage.node || activeOn[0]}
+                                                                onChange={e => loadStorageContent(selectedStorage.name, e.target.value)}
+                                                                className="bg-proxmox-dark border border-proxmox-border rounded px-2 py-1 text-xs text-white"
+                                                            >
+                                                                {activeOn.map(n => (
+                                                                    <option key={n} value={n}>{n} ✓</option>
+                                                                ))}
+                                                                {inactiveOn.map(n => (
+                                                                    <option key={n} value={n} disabled>{n} ({t('storageUnreachable') || 'unreachable'})</option>
+                                                                ))}
+                                                            </select>
+                                                        </span>
+                                                    );
+                                                })()}
                                             </h3>
                                             {selectedStorage && isAdmin && (
                                                 <div className="flex gap-2">

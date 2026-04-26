@@ -196,7 +196,19 @@ def migrate_all_encryption():
 @bp.route('/api/pegaprox/check-update', methods=['GET'])
 @require_auth(roles=[ROLE_ADMIN])
 def check_pegaprox_update():
-    """Check for PegaProx updates (mirror + GitHub fallback)"""
+    """Check for PegaProx updates (mirror + GitHub fallback).
+
+    NS Apr 2026 — short-circuited when air-gap mode is enabled. Returns the
+    current version with a hint flag so the UI can render "Air-gap mode active —
+    update checks disabled" instead of a misleading "no updates available".
+    """
+    if load_server_settings().get('air_gap_mode', False):
+        return jsonify({
+            'current_version': PEGAPROX_VERSION,
+            'current_build': PEGAPROX_BUILD,
+            'update_available': False,
+            'air_gap': True,
+        }), 200
     try:
         # NS: Feb 2026 - GitHub first, mirror as fallback
         response = None
@@ -1022,8 +1034,27 @@ def update_server_settings():
                 old_val = settings.get('password_expiry_include_admins')
                 settings['password_expiry_include_admins'] = bool(data['password_expiry_include_admins'])
                 if old_val != settings['password_expiry_include_admins']:
-                    log_audit(request.session.get('user', 'admin'), 'settings.password_expiry', 
+                    log_audit(request.session.get('user', 'admin'), 'settings.password_expiry',
                               f"Admin password expiry {'enabled' if settings['password_expiry_include_admins'] else 'disabled'}")
+
+            # NS Apr 2026 — audit log retention (BSI Grundschutz: ≥ 6 Monate Empfehlung)
+            if 'audit_retention_days' in data:
+                old_val = settings.get('audit_retention_days', 90)
+                settings['audit_retention_days'] = max(30, min(3650, int(data['audit_retention_days'])))
+                if old_val != settings['audit_retention_days']:
+                    log_audit(request.session.get('user', 'admin'), 'settings.audit_retention',
+                              f"Audit retention changed: {old_val} -> {settings['audit_retention_days']} days")
+
+            # NS Apr 2026 — air-gap mode: disables update-mirror calls, external CVE
+            # online lookups, OIDC discovery against public IdPs. OpenCollective links
+            # and sponsor logos stay visible — they don't fire outbound HTTP, just hyperlinks.
+            # For BSI VS-NfD / restricted networks where outbound HTTP must not happen.
+            if 'air_gap_mode' in data:
+                old_val = settings.get('air_gap_mode', False)
+                settings['air_gap_mode'] = bool(data['air_gap_mode'])
+                if old_val != settings['air_gap_mode']:
+                    log_audit(request.session.get('user', 'admin'), 'settings.air_gap',
+                              f"Air-gap mode {'enabled' if settings['air_gap_mode'] else 'disabled'}")
             
             # NS Mar 2026 - reverse proxy / nginx settings
             if 'reverse_proxy_enabled' in data:
@@ -1281,6 +1312,19 @@ def update_server_settings():
             settings['reverse_proxy_enabled'] = reverse_proxy
             settings['trusted_proxies'] = trusted_proxies
             settings['proxy_bind_address'] = proxy_bind
+            # NS Apr 2026 — compliance settings from form-data branch
+            if 'audit_retention_days' in request.form:
+                old_ar = settings.get('audit_retention_days', 90)
+                settings['audit_retention_days'] = max(30, min(3650, int(request.form.get('audit_retention_days', 90))))
+                if old_ar != settings['audit_retention_days']:
+                    log_audit(request.session.get('user', 'admin'), 'settings.audit_retention',
+                              f"Audit retention {old_ar} -> {settings['audit_retention_days']} days")
+            if 'air_gap_mode' in request.form:
+                old_ag = settings.get('air_gap_mode', False)
+                settings['air_gap_mode'] = request.form.get('air_gap_mode', 'false').lower() == 'true'
+                if old_ag != settings['air_gap_mode']:
+                    log_audit(request.session.get('user', 'admin'), 'settings.air_gap',
+                              f"Air-gap mode {'enabled' if settings['air_gap_mode'] else 'disabled'}")
             # ACME settings from multipart form
             settings['acme_enabled'] = request.form.get('acme_enabled', str(settings.get('acme_enabled', 'false'))).lower() == 'true'
             settings['acme_email'] = request.form.get('acme_email', settings.get('acme_email', '')).strip()

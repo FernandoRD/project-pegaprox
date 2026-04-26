@@ -1691,54 +1691,65 @@ def run_custom_script(cluster_id, script_id):
     # Log the execution attempt BEFORE running
     log_audit(usr, 'script.execution_started', f"Starting execution of script '{script['name']}' (ID: {script_id}) on {len(nodes_to_run)} nodes: {', '.join(nodes_to_run)}", cluster=cluster_name)
     
-    results = []
     script_ext = '.py' if script['type'] == 'python' else '.sh'
     interpreter = 'python3' if script['type'] == 'python' else 'bash'
-    all_output = []
-    
-    for node in nodes_to_run:
+
+    # NS Apr 2026 — was a serial `for node in nodes_to_run` loop. With 15-node
+    # clusters that meant up to 15 × 300s timeout = 75 min worst-case for one
+    # script run. Now bounded-parallel via run_per_node (default 8 workers).
+    # IMPORTANT: HA paths are completely separate (manager.py _ssh_run_command_*)
+    # and DO NOT go through this helper — HA latency is unaffected.
+    def _exec_on_node(node):
         node_ip = mgr._get_node_ip(node)
         if not node_ip:
-            results.append({'node': node, 'success': False, 'error': 'Could not determine SSH-reachable IP', 'output': ''})
-            all_output.append(f"=== {node} ===\nCould not determine SSH-reachable IP\n")
-            continue
+            return {'node': node, 'success': False, 'error': 'Could not determine SSH-reachable IP', 'output': ''}
         try:
             ssh = mgr._ssh_connect(node_ip)
             if not ssh:
-                results.append({'node': node, 'success': False, 'error': 'SSH connection failed', 'output': ''})
-                all_output.append(f"=== {node} ===\nSSH connection failed\n")
-                continue
-            
-            # Upload script to temp location
+                return {'node': node, 'success': False, 'error': 'SSH connection failed', 'output': ''}
+
             script_path = f'/tmp/pegaprox_script_{script_id}{script_ext}'
             sftp = ssh.open_sftp()
             with sftp.file(script_path, 'w') as f:
                 f.write(script['content'])
             sftp.chmod(script_path, 0o755)
             sftp.close()
-            
-            # Run script with timeout
+
             stdin, stdout, stderr = ssh.exec_command(f'{interpreter} {script_path} 2>&1', timeout=300)
             output = stdout.read().decode('utf-8', errors='replace')
             exit_code = stdout.channel.recv_exit_status()
-            
-            # Clean up
+
             ssh.exec_command(f'rm -f {script_path}')
             ssh.close()
-            
-            all_output.append(f"=== {node} (exit: {exit_code}) ===\n{output}\n")
-            
-            results.append({
+
+            return {
                 'node': node,
                 'success': exit_code == 0,
                 'exit_code': exit_code,
-                'output': output[:10000] if output else ''  # Limit output size
-            })
-            
+                'output': output[:10000] if output else ''
+            }
         except Exception as e:
-            error_msg = str(e)
-            results.append({'node': node, 'success': False, 'error': error_msg, 'output': ''})
-            all_output.append(f"=== {node} ===\nError: {error_msg}\n")
+            return {'node': node, 'success': False, 'error': str(e), 'output': ''}
+
+    from pegaprox.utils.concurrent import run_per_node
+    # Per-cluster cap of 8 workers — keeps total connections bounded even if
+    # multiple clusters run scripts at once, AND leaves headroom for HA SSH
+    # which goes through the separate untracked path.
+    raw = run_per_node(
+        {n: _exec_on_node for n in nodes_to_run},
+        max_concurrent=8,
+        timeout=320,  # script timeout is 300, give the wrapper a small slack
+    )
+    # Preserve original input order in results list
+    results = []
+    all_output = []
+    for node in nodes_to_run:
+        r = raw.get(node) or {'node': node, 'success': False, 'error': 'Timed out or no result', 'output': ''}
+        results.append(r)
+        if r.get('output'):
+            all_output.append(f"=== {node} (exit: {r.get('exit_code', '?')}) ===\n{r['output']}\n")
+        elif r.get('error'):
+            all_output.append(f"=== {node} ===\n{r['error']}\n")
     
     # Update last run info with output
     success_count = sum(1 for r in results if r['success'])

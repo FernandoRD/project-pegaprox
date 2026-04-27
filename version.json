@@ -96,6 +96,7 @@
         "pegaprox/utils/concurrent.py",
         "pegaprox/utils/email.py",
         "pegaprox/utils/ldap.py",
+        "pegaprox/utils/log_handler.py",
         "pegaprox/utils/oidc.py",
         "pegaprox/utils/rbac.py",
         "pegaprox/utils/realtime.py",

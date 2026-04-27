@@ -309,8 +309,11 @@ class PegaProxManager:
         if self.logger.handlers:
             self.logger.handlers.clear()
         
-        # File handler - DEBUG level (for troubleshooting)
-        fh = logging.FileHandler(f"{LOG_DIR}/{cluster_id}.log")
+        # File handler - DEBUG level (for troubleshooting). Capped at 6h of data,
+        # rotated content is discarded — see #345 / #348 (#348: shipped VM was
+        # filling its own disk on busy clusters).
+        from pegaprox.utils.log_handler import CappedTimedFileHandler
+        fh = CappedTimedFileHandler(f"{LOG_DIR}/{cluster_id}.log", when='H', interval=6, backupCount=0)
         fh.setLevel(logging.DEBUG)
         
         # Console handler - INFO level (no DEBUG spam)

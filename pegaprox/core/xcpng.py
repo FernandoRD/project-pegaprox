@@ -135,7 +135,9 @@ class XcpngManager:
         self.logger.propagate = False
         if self.logger.handlers:
             self.logger.handlers.clear()
-        fh = logging.FileHandler(f"{LOG_DIR}/{cluster_id}.log")
+        # 6h cap on the per-cluster log to keep disk under control (#345/#348)
+        from pegaprox.utils.log_handler import CappedTimedFileHandler
+        fh = CappedTimedFileHandler(f"{LOG_DIR}/{cluster_id}.log", when='H', interval=6, backupCount=0)
         fh.setLevel(logging.DEBUG)
         ch = logging.StreamHandler()
         ch.setLevel(logging.INFO)

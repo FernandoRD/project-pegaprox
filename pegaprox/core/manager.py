@@ -10618,10 +10618,19 @@ echo "AGENT_INSTALLED_OK"
             
             if vm_type == 'qemu':
                 url = f"https://{self.host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
-                
+
                 # Build disk string - format is storage:size (size in GB without unit)
                 disk_str = f"{storage}:{size}"
-                
+
+                # MK Apr 2026 — pass through explicit disk format. PVE 9.1 added
+                # qcow2 support on LVM/LVM-thin in addition to file storages, so we
+                # let the caller pick. Block-only stores (zfs/rbd/iscsi) only accept
+                # 'raw' but PVE returns a clear error on mismatch — we don't need
+                # to guard it here.
+                disk_format = (disk_config.get('format') or '').strip().lower()
+                if disk_format and disk_format != 'auto':
+                    disk_str += f",format={disk_format}"
+
                 # Add optional parameters (only if supported by bus type)
                 if disk_config.get('cache'):
                     disk_str += f",cache={disk_config['cache']}"
@@ -10635,7 +10644,7 @@ echo "AGENT_INSTALLED_OK"
                     disk_str += ",discard=on"
                 if disk_config.get('backup') == False:
                     disk_str += ",backup=0"
-                
+
                 data = {disk_id: disk_str}
                 
             else:  # LXC

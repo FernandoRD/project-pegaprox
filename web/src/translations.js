@@ -4,6 +4,15 @@
         // ═══════════════════════════════════════════════
         const translations = {
             de: {
+                frameworkCoverageByFamily: 'Framework-Abdeckung — nach Familie / Thema',
+                family: 'Familie',
+                familyName: 'Bezeichnung',
+                refsCovered: 'Abgedeckte Referenzen',
+                pegaproxControls: 'PegaProx-Controls',
+                unmappedControls: 'Controls ohne direktes Framework-Mapping (informativ)',
+                rationale: 'Hinweis',
+                noDirectMappingNote: 'Keine direkte Referenz dieses Checks im Framework. Wird als Defense-in-Depth-Hygiene ausgeführt, zählt nicht zur Framework-Abdeckung.',
+
                 intraClusterReplOnlyHint: 'Dieser Dialog legt Replikation innerhalb des aktuellen Clusters an. Für Replikation über Cluster hinweg öffne VM → Konfiguration → Replikation → Cross-Cluster.',
 
                 certPresentPlaceholder: '(Zertifikat hochgeladen)',
@@ -47,7 +56,7 @@
                 cmSessionLimit: 'TMOUT Session-Limits',
                 cmShellTimeout: 'Shell-Timeout',
                 cmSshCrypto: 'SSH Cipher + MACs (BSI/CIS)',
-                cmSshPerms: 'SSH-Datei-Permissions + Config',
+                cmSshPerms: 'sshd-Hardening — Konfig + Schlüssel-/Config-Dateirechte (PermitRootLogin, sshd_config 0600, /etc/ssh/* 0600)',
                 cmSysctl: 'sysctl Netzwerk-Hardening',
                 cmSysstat: 'sysstat (sar) sammelt',
                 cmUsbStorage: 'USB-Massenspeicher deaktiviert',
@@ -3524,6 +3533,15 @@
                 passwordChangedReloginRequired: 'Passwort geändert — bitte erneut anmelden.',
             },
             en: {
+                frameworkCoverageByFamily: 'Framework coverage — by family / theme',
+                family: 'Family',
+                familyName: 'Name',
+                refsCovered: 'References covered',
+                pegaproxControls: 'PegaProx controls',
+                unmappedControls: 'Controls without a direct framework mapping (informational)',
+                rationale: 'Note',
+                noDirectMappingNote: 'No direct framework reference for this check. Run as defence-in-depth hygiene; not counted toward framework coverage.',
+
                 intraClusterReplOnlyHint: 'This dialog creates replication within the current cluster. For replication across clusters, open the VM → Configure → Replication → Cross-Cluster tab.',
 
                 certPresentPlaceholder: '(certificate uploaded)',
@@ -3567,7 +3585,7 @@
                 cmSessionLimit: 'TMOUT session limits',
                 cmShellTimeout: 'Shell timeout',
                 cmSshCrypto: 'SSH ciphers + MACs (BSI/CIS)',
-                cmSshPerms: 'SSH file permissions + config',
+                cmSshPerms: 'sshd hardening — config + key/config file permissions (PermitRootLogin, sshd_config 0600, /etc/ssh/* 0600)',
                 cmSysctl: 'sysctl network hardening',
                 cmSysstat: 'sysstat (sar) collecting',
                 cmUsbStorage: 'USB mass storage disabled',
@@ -6989,6 +7007,15 @@
             // French translations by @IMNotMax (PR #186)
             // Falls back to EN for missing keys
             fr: {
+                frameworkCoverageByFamily: 'Couverture du référentiel — par famille / thème',
+                family: 'Famille',
+                familyName: 'Nom',
+                refsCovered: 'Références couvertes',
+                pegaproxControls: 'Contrôles PegaProx',
+                unmappedControls: 'Contrôles sans mapping direct au référentiel (informatif)',
+                rationale: 'Note',
+                noDirectMappingNote: 'Aucune référence directe du référentiel pour ce contrôle. Exécuté comme hygiène en défense en profondeur ; non comptabilisé dans la couverture.',
+
                 intraClusterReplOnlyHint: 'Cette fenêtre crée une réplication au sein du cluster courant. Pour la réplication entre clusters, ouvrez VM → Configurer → Réplication → Cross-Cluster.',
 
                 certPresentPlaceholder: '(certificat téléchargé)',
@@ -7046,7 +7073,7 @@
                 cmSessionLimit: 'Limites de session TMOUT',
                 cmShellTimeout: 'Délai d’inactivité shell',
                 cmSshCrypto: 'Ciphers + MACs SSH (BSI/CIS)',
-                cmSshPerms: 'Permissions fichiers SSH + config',
+                cmSshPerms: 'Durcissement sshd — config + permissions des clés (PermitRootLogin, sshd_config 0600, /etc/ssh/* 0600)',
                 cmSysctl: 'Durcissement réseau sysctl',
                 cmSysstat: 'sysstat (sar) collecte',
                 cmUsbStorage: 'Stockage USB de masse désactivé',
@@ -10248,6 +10275,15 @@
                 passwordChangedReloginRequired: 'Mot de passe modifié — veuillez vous reconnecter.',
             },
             es: {
+                frameworkCoverageByFamily: 'Cobertura del marco — por familia / tema',
+                family: 'Familia',
+                familyName: 'Nombre',
+                refsCovered: 'Referencias cubiertas',
+                pegaproxControls: 'Controles PegaProx',
+                unmappedControls: 'Controles sin mapeo directo al marco (informativo)',
+                rationale: 'Nota',
+                noDirectMappingNote: 'Sin referencia directa del marco para esta verificación. Se ejecuta como higiene de defensa en profundidad; no cuenta para la cobertura del marco.',
+
                 intraClusterReplOnlyHint: 'Este diálogo crea replicación dentro del clúster actual. Para replicación entre clústeres, abra VM → Configurar → Replicación → Cross-Cluster.',
 
                 certPresentPlaceholder: '(certificado subido)',
@@ -10299,7 +10335,7 @@
                 cmSessionLimit: 'Límites de sesión TMOUT',
                 cmShellTimeout: 'Tiempo de espera del shell',
                 cmSshCrypto: 'Ciphers + MACs SSH (BSI/CIS)',
-                cmSshPerms: 'Permisos de archivos SSH + configuración',
+                cmSshPerms: 'Hardening de sshd — configuración + permisos de claves (PermitRootLogin, sshd_config 0600, /etc/ssh/* 0600)',
                 cmSysctl: 'Hardening de red sysctl',
                 cmSysstat: 'sysstat (sar) recolectando',
                 cmUsbStorage: 'Almacenamiento USB masivo deshabilitado',
@@ -13656,6 +13692,15 @@
                 passwordChangedReloginRequired: 'Contraseña cambiada — inicia sesión de nuevo.',
             },
             pt: {
+                frameworkCoverageByFamily: 'Cobertura do framework — por família / tema',
+                family: 'Família',
+                familyName: 'Nome',
+                refsCovered: 'Referências cobertas',
+                pegaproxControls: 'Controlos PegaProx',
+                unmappedControls: 'Controlos sem mapeamento direto ao framework (informativo)',
+                rationale: 'Nota',
+                noDirectMappingNote: 'Sem referência direta do framework para esta verificação. Executada como higiene de defesa em profundidade; não conta para a cobertura.',
+
                 intraClusterReplOnlyHint: 'Este diálogo cria replicação dentro do cluster atual. Para replicação entre clusters, abra VM → Configurar → Replicação → Cross-Cluster.',
 
                 certPresentPlaceholder: '(certificado carregado)',
@@ -13712,7 +13757,7 @@
                 cmSessionLimit: 'Limites de sessão TMOUT',
                 cmShellTimeout: 'Timeout da shell',
                 cmSshCrypto: 'Ciphers + MACs SSH (BSI/CIS)',
-                cmSshPerms: 'Permissões de ficheiros SSH + config',
+                cmSshPerms: 'Hardening do sshd — config + permissões de chaves (PermitRootLogin, sshd_config 0600, /etc/ssh/* 0600)',
                 cmSysctl: 'Hardening de rede sysctl',
                 cmSysstat: 'sysstat (sar) a recolher',
                 cmUsbStorage: 'Armazenamento USB em massa desativado',
@@ -20121,6 +20166,15 @@
                 passwordChangedReloginRequired: '비밀번호가 변경되었습니다 — 다시 로그인하세요.',
             },
             it: {
+                frameworkCoverageByFamily: 'Copertura del framework — per famiglia / tema',
+                family: 'Famiglia',
+                familyName: 'Nome',
+                refsCovered: 'Riferimenti coperti',
+                pegaproxControls: 'Controlli PegaProx',
+                unmappedControls: 'Controlli senza mapping diretto al framework (informativo)',
+                rationale: 'Nota',
+                noDirectMappingNote: 'Nessun riferimento diretto del framework per questo controllo. Eseguito come igiene difensiva; non conteggiato nella copertura.',
+
                 intraClusterReplOnlyHint: 'Questa finestra crea la replicazione nel cluster corrente. Per la replicazione tra cluster, apri VM → Configura → Replicazione → Cross-Cluster.',
 
                 certPresentPlaceholder: '(certificato caricato)',
@@ -20172,7 +20226,7 @@
                 cmSessionLimit: 'Limiti di sessione TMOUT',
                 cmShellTimeout: 'Timeout shell',
                 cmSshCrypto: 'Cipher + MAC SSH (BSI/CIS)',
-                cmSshPerms: 'Permessi file SSH + config',
+                cmSshPerms: 'Hardening sshd — config + permessi delle chiavi (PermitRootLogin, sshd_config 0600, /etc/ssh/* 0600)',
                 cmSysctl: 'Hardening di rete sysctl',
                 cmSysstat: 'sysstat (sar) raccoglie',
                 cmUsbStorage: 'USB mass storage disabilitato',

@@ -6229,7 +6229,7 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">MAC Adresse</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
                                         <div className="flex gap-2">
                                             <input type="text" value={netConfig.macaddr} onChange={(e) => setNetConfig({...netConfig, macaddr: e.target.value})}
                                                 placeholder="auto" className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
@@ -6250,7 +6250,7 @@
                                                 className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs text-gray-400 mb-1">MAC Adresse</label>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
                                             <div className="flex gap-2">
                                                 <input type="text" value={netConfig.hwaddr} onChange={(e) => setNetConfig({...netConfig, hwaddr: e.target.value})}
                                                     placeholder="auto" className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
@@ -6387,7 +6387,7 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-gray-400 mb-1">MAC Adresse</label>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
                                         <div className="flex gap-2">
                                             <input type="text" value={editConfig.macaddr} onChange={(e) => setEditConfig({...editConfig, macaddr: e.target.value})}
                                                 className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
@@ -6465,7 +6465,7 @@
                                             placeholder="1"
                                             min="1" max="64"
                                             className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
-                                        <p className="text-xs text-gray-500 mt-1">1-64 Queues (nur VirtIO)</p>
+                                        <p className="text-xs text-gray-500 mt-1">{t('multiqueueHint') || '1–64 queues (VirtIO only)'}</p>
                                     </div>
                                 )}
                             </div>
